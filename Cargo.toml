@@ -9,8 +9,9 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
+rust-version = "1.85"
 authors = ["Voldigoade"]
 repository = "https://github.com/Voldigoade/spoor"
 description = "Terminal-first GitHub public-footprint inspection and research tool"

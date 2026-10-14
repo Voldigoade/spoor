@@ -27,6 +27,57 @@ impl std::fmt::Display for AnalysisMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AnalysisOptions {
+    pub mode: AnalysisMode,
+    #[serde(default)]
+    pub enrich: bool,
+}
+
+impl Default for AnalysisOptions {
+    fn default() -> Self {
+        Self {
+            mode: AnalysisMode::Fast,
+            enrich: false,
+        }
+    }
+}
+
+impl AnalysisOptions {
+    pub fn fast() -> Self {
+        Self {
+            mode: AnalysisMode::Fast,
+            enrich: false,
+        }
+    }
+
+    pub fn fast_enriched() -> Self {
+        Self {
+            mode: AnalysisMode::Fast,
+            enrich: true,
+        }
+    }
+
+    pub fn deep() -> Self {
+        Self {
+            mode: AnalysisMode::Deep,
+            enrich: true,
+        }
+    }
+
+    pub fn new(mode: AnalysisMode, enrich: Option<bool>) -> Self {
+        let enrich = enrich.unwrap_or(mode == AnalysisMode::Deep);
+        Self { mode, enrich }
+    }
+}
+
+impl From<AnalysisMode> for AnalysisOptions {
+    fn from(mode: AnalysisMode) -> Self {
+        let enrich = mode == AnalysisMode::Deep;
+        Self { mode, enrich }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Target {

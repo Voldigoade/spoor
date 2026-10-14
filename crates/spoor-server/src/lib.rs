@@ -14,10 +14,10 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
-pub use limiter::EphemeralIpRateLimiter;
+pub use limiter::{EphemeralIpRateLimiter, GlobalRateLimiter, RateLimitResult, ServerRateLimiter};
 pub use proxy::TrustedProxyConfig;
 pub use routes::*;
-pub use state::{AppState, LookupEntry, LookupStatus};
+pub use state::{AppState, LookupEntry, LookupStatus, ServerOptions};
 
 pub fn create_router(state: AppState) -> Router {
     // Configurable CORS: read SPOOR_ALLOWED_ORIGINS or default to development origins
@@ -60,6 +60,19 @@ pub fn create_router(state: AppState) -> Router {
 }
 
 pub async fn run_server(addr: SocketAddr, state: AppState) -> Result<(), SpoorError> {
+    // Background lookup retention cleanup
+    let retention_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let pruned = retention_state.prune_expired_lookups().await;
+            if pruned > 0 {
+                tracing::debug!("Pruned {pruned} expired lookups from memory");
+            }
+        }
+    });
+
     let app = create_router(state).into_make_service_with_connect_info::<SocketAddr>();
     let listener = tokio::net::TcpListener::bind(addr)
         .await

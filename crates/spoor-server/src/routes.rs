@@ -3,14 +3,14 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::extract::{ConnectInfo, Path, State};
-use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
+use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use spoor_core::{AnalysisMode, SpoorEvent, Target};
+use spoor_core::{AnalysisMode, AnalysisOptions, SpoorEvent, Target};
 use spoor_export::{export_bytes, ExportFormat};
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::BroadcastStream;
@@ -38,6 +38,8 @@ pub struct CreateLookupRequest {
     pub target: String,
     #[serde(default)]
     pub mode: Option<AnalysisMode>,
+    #[serde(default)]
+    pub enrich: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -45,6 +47,8 @@ pub struct LookupMetaResponse {
     pub id: Uuid,
     pub target: String,
     pub mode: AnalysisMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enrich: Option<bool>,
     pub status: LookupStatus,
     pub created_at: chrono::DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -55,6 +59,26 @@ pub struct LookupMetaResponse {
 pub struct ApiErrorResponse {
     pub error: String,
     pub code: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after: Option<u64>,
+}
+
+impl ApiErrorResponse {
+    pub fn new(code: &'static str, error: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+            code,
+            retry_after: None,
+        }
+    }
+
+    pub fn with_retry(code: &'static str, error: impl Into<String>, retry_after: u64) -> Self {
+        Self {
+            error: error.into(),
+            code,
+            retry_after: Some(retry_after),
+        }
+    }
 }
 
 pub async fn create_lookup_handler(
@@ -62,37 +86,62 @@ pub async fn create_lookup_handler(
     headers: HeaderMap,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(payload): Json<CreateLookupRequest>,
-) -> Result<(StatusCode, Json<LookupMetaResponse>), (StatusCode, Json<ApiErrorResponse>)> {
-    // 1. IP rate limiting (extract IP using trusted proxy resolver)
+) -> Response {
+    // 1. Periodically prune expired lookups from process memory
+    let _ = state.prune_expired_lookups().await;
+
+    // 2. Validate analysis mode against public instance policy
+    let mode = payload.mode.unwrap_or(AnalysisMode::Fast);
+    let enrich = payload.enrich.unwrap_or(false);
+
+    if mode == AnalysisMode::Deep && !state.http_deep_enabled {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiErrorResponse::new(
+                "mode_disabled",
+                "Full DEEP analysis mode is disabled on this public instance. Use mode=fast with optional enrich=true.",
+            )),
+        )
+            .into_response();
+    }
+
+    // 3. Rate limiting (per-IP and global anti-abuse)
     let client_ip = state.proxy_config.resolve_client_ip(addr.ip(), &headers);
 
-    let allowed = {
+    let rate_limit_res = {
         let mut limiter = state.limiter.lock().await;
         limiter.check_and_record(&client_ip.to_string())
     };
 
-    if !allowed {
-        return Err((
+    if let Some(retry_after) = rate_limit_res.retry_after() {
+        let mut resp_headers = HeaderMap::new();
+        if let Ok(val) = retry_after.to_string().parse() {
+            resp_headers.insert(RETRY_AFTER, val);
+        }
+        return (
             StatusCode::TOO_MANY_REQUESTS,
-            Json(ApiErrorResponse {
-                error: "Rate limit exceeded. Maximum 30 lookups per minute.".to_string(),
-                code: "rate_limit_exceeded",
-            }),
-        ));
+            resp_headers,
+            Json(ApiErrorResponse::with_retry(
+                "rate_limited",
+                format!("Rate limit exceeded. Please retry after {retry_after} seconds."),
+                retry_after,
+            )),
+        )
+            .into_response();
     }
 
-    // 2. Parse target with strict SSRF validation
-    let target = Target::parse(&payload.target).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ApiErrorResponse {
-                error: e.to_string(),
-                code: "invalid_target",
-            }),
-        )
-    })?;
+    // 4. Parse target with strict SSRF validation
+    let target = match Target::parse(&payload.target) {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiErrorResponse::new("invalid_target", e.to_string())),
+            )
+                .into_response();
+        }
+    };
 
-    let mode = payload.mode.unwrap_or_default();
     let id = Uuid::new_v4();
     let created_at = Utc::now();
 
@@ -102,6 +151,7 @@ pub async fn create_lookup_handler(
         id,
         target: target.clone(),
         mode,
+        enrich,
         status: LookupStatus::Pending,
         created_at,
         report: None,
@@ -114,11 +164,11 @@ pub async fn create_lookup_handler(
         map.insert(id, entry);
     }
 
-    // 3. Spawn background execution
+    // 5. Spawn background execution
     let bg_state = state.clone();
     let bg_target = target.clone();
     let bg_id = id;
-    let bg_mode = mode;
+    let bg_options = AnalysisOptions { mode, enrich };
     let bg_bcast = broadcast_tx;
 
     tokio::spawn(async move {
@@ -139,11 +189,11 @@ pub async fn create_lookup_handler(
             }
         });
 
-        // Bounded concurrency
+        // Bounded concurrency semaphore
         let _permit = bg_state.concurrency_semaphore.acquire().await;
         let res = bg_state
             .engine
-            .run_analysis(&bg_target, bg_mode, Some(mpsc_tx))
+            .run_analysis(&bg_target, bg_options, Some(mpsc_tx))
             .await;
 
         let mut map = bg_state.lookups.write().await;
@@ -164,17 +214,19 @@ pub async fn create_lookup_handler(
         }
     });
 
-    Ok((
+    (
         StatusCode::ACCEPTED,
         Json(LookupMetaResponse {
             id,
             target: target.display_name(),
             mode,
+            enrich: Some(enrich),
             status: LookupStatus::Pending,
             created_at,
             error: None,
         }),
-    ))
+    )
+        .into_response()
 }
 
 pub async fn get_lookup_handler(
@@ -185,10 +237,10 @@ pub async fn get_lookup_handler(
     let entry = map.get(&id).ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
-            Json(ApiErrorResponse {
-                error: format!("Lookup with ID '{id}' was not found"),
-                code: "not_found",
-            }),
+            Json(ApiErrorResponse::new(
+                "not_found",
+                format!("Lookup with ID '{id}' was not found"),
+            )),
         )
     })?;
 
@@ -196,6 +248,7 @@ pub async fn get_lookup_handler(
         id: entry.id,
         target: entry.target.display_name(),
         mode: entry.mode,
+        enrich: Some(entry.enrich),
         status: entry.status,
         created_at: entry.created_at,
         error: entry.error.clone(),
@@ -211,10 +264,10 @@ pub async fn stream_events_handler(
     let entry = map.get(&id).ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
-            Json(ApiErrorResponse {
-                error: format!("Lookup with ID '{id}' was not found"),
-                code: "not_found",
-            }),
+            Json(ApiErrorResponse::new(
+                "not_found",
+                format!("Lookup with ID '{id}' was not found"),
+            )),
         )
     })?;
 
@@ -239,10 +292,10 @@ pub async fn get_report_handler(
     let entry = map.get(&id).ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
-            Json(ApiErrorResponse {
-                error: format!("Lookup '{id}' not found"),
-                code: "not_found",
-            }),
+            Json(ApiErrorResponse::new(
+                "not_found",
+                format!("Lookup '{id}' not found"),
+            )),
         )
     })?;
 
@@ -253,30 +306,29 @@ pub async fn get_report_handler(
             } else {
                 Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiErrorResponse {
-                        error: "Report record missing".to_string(),
-                        code: "internal_error",
-                    }),
+                    Json(ApiErrorResponse::new(
+                        "internal_error",
+                        "Report record missing",
+                    )),
                 ))
             }
         }
         LookupStatus::Failed => Err((
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(ApiErrorResponse {
-                error: entry
+            Json(ApiErrorResponse::new(
+                "lookup_failed",
+                entry
                     .error
                     .clone()
                     .unwrap_or_else(|| "Lookup failed".into()),
-                code: "lookup_failed",
-            }),
+            )),
         )),
         LookupStatus::Pending | LookupStatus::Running => Err((
             StatusCode::ACCEPTED,
-            Json(ApiErrorResponse {
-                error: "Lookup is currently running. Subscribe to /events or check back shortly."
-                    .to_string(),
-                code: "in_progress",
-            }),
+            Json(ApiErrorResponse::new(
+                "in_progress",
+                "Lookup is currently running. Subscribe to /events or check back shortly.",
+            )),
         )),
     }
 }
@@ -288,10 +340,7 @@ pub async fn export_report_handler(
     let fmt = ExportFormat::from_str_loose(&format_str).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
-            Json(ApiErrorResponse {
-                error: e.to_string(),
-                code: "unsupported_format",
-            }),
+            Json(ApiErrorResponse::new("unsupported_format", e.to_string())),
         )
     })?;
 
@@ -299,10 +348,10 @@ pub async fn export_report_handler(
     let entry = map.get(&id).ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
-            Json(ApiErrorResponse {
-                error: format!("Lookup '{id}' not found"),
-                code: "not_found",
-            }),
+            Json(ApiErrorResponse::new(
+                "not_found",
+                format!("Lookup '{id}' not found"),
+            )),
         )
     })?;
 
@@ -311,13 +360,13 @@ pub async fn export_report_handler(
         None => {
             return Err((
                 StatusCode::CONFLICT,
-                Json(ApiErrorResponse {
-                    error: format!(
+                Json(ApiErrorResponse::new(
+                    "report_not_ready",
+                    format!(
                         "Report is not ready yet (current status: {:?})",
                         entry.status
                     ),
-                    code: "report_not_ready",
-                }),
+                )),
             ));
         }
     };
@@ -325,10 +374,7 @@ pub async fn export_report_handler(
     let bytes = export_bytes(report, fmt).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse {
-                error: e.to_string(),
-                code: "export_failed",
-            }),
+            Json(ApiErrorResponse::new("export_failed", e.to_string())),
         )
     })?;
 

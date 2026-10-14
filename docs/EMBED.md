@@ -61,12 +61,14 @@ Content-Type: application/json
 ```json
 {
   "target": "Voldigoade",
-  "mode": "fast"
+  "mode": "fast",
+  "enrich": true
 }
 ```
 
 * `target` (string, required): GitHub username (`torvalds`), profile URL (`https://github.com/torvalds`), repository shorthand (`torvalds/linux`), or repository URL (`https://github.com/torvalds/linux`).
-* `mode` (string, optional, default `"fast"`): `"fast"` (optimized for interactive latency, bounded commit sample, cache-prioritized) or `"deep"` (broader commit analysis, GitLeak enrichment).
+* `mode` (string, optional, default `"fast"`): `"fast"` (optimized for interactive latency, bounded commit sample, cache-prioritized) or `"deep"` (full commit inspection across up to 8 repositories). Note: public HTTP instances have full `"deep"` mode disabled by default (`SPOOR_HTTP_DEEP_ENABLED=false`) and return `403 Forbidden` (`mode_disabled`).
+* `enrich` (boolean, optional, default `false`): Enables upstream GitLeak provider enrichment in `fast` mode while preserving bounded GitHub commit scanning. Recommended for interactive portfolio lookups.
 
 **Response Body (`202 Accepted`):**
 ```json
@@ -74,6 +76,7 @@ Content-Type: application/json
   "id": "e9b27b3b-871f-44e2-9f6e-693d258bdf05",
   "target": "Voldigoade",
   "mode": "fast",
+  "enrich": true,
   "status": "pending",
   "created_at": "2026-10-14T18:34:11.234567Z"
 }
@@ -207,10 +210,11 @@ Error responses use standard RFC-compatible JSON bodies:
 | HTTP Status | Error Code | Description |
 | :--- | :--- | :--- |
 | `400 Bad Request` | `invalid_target` | Malformed target, unsupported scheme, or SSRF rejection |
+| `403 Forbidden` | `mode_disabled` | Full DEEP analysis mode is disabled on public server instance |
 | `404 Not Found` | `not_found` | Lookup ID does not exist |
 | `409 Conflict` | `report_not_ready` | Report requested before analysis finished |
 | `422 Unprocessable` | `lookup_failed` | Upstream target not found (e.g. 404 user on GitHub) |
-| `429 Too Many Requests` | `rate_limit_exceeded` | Client exceeded 30 lookups/minute limit |
+| `429 Too Many Requests` | `rate_limited` | Client or global rate limit exceeded (includes `Retry-After` header) |
 | `500 Internal Error` | `internal_error` | Server processing error |
 
 ---
@@ -218,9 +222,14 @@ Error responses use standard RFC-compatible JSON bodies:
 ## 5. Security & Abuse Controls
 
 1. **SSRF Protection:** Target parsing rejects any non-GitHub domain or IP address. Requests to internal addresses (`127.0.0.1`, `169.254.169.254`, `localhost`) are refused at the parser level before any socket connection occurs.
-2. **Ephemeral IP Rate Limiting:** Client IP addresses are salted and hashed into memory with short TTLs. No raw IP addresses are logged or stored.
+2. **Dual-Layer Rate Limiting:**
+   * **Per-IP Rate Limiting:** Ephemeral in-memory sliding window (default 10 lookups/hour per IP). Client IPs are salted and hashed with a startup secret; no raw IPs are stored or logged.
+   * **Global Instance Limiting:** Instance-wide anti-abuse limiter (default 100 lookups/hour) to protect against distributed botnets.
+   * Only `POST /v1/lookups` creation is rate-limited; polling, SSE streaming, and exports are never charged.
 3. **Execution Safety:** Spoor never runs code from inspected repositories (`npm`, `pip`, `cargo`, shell scripts).
 4. **Token Isolation:** Server-side `GITHUB_TOKEN` is never echoed in API responses, logs, or exports.
+5. **GitLeak Provider Budget:** Process-local sliding window protects upstream quota (default 40 requests/hour). Cache hits (24h TTL) do not consume budget. On budget exhaustion, Spoor gracefully proceeds with GitHub metadata alone.
+6. **In-Memory Retention (TTL):** Completed and failed lookups expire after `SPOOR_LOOKUP_RETENTION_SECS` (default 3600s). Pending and running lookups are never evicted.
 
 ---
 
@@ -236,8 +245,8 @@ const spoor = new SpoorClient({ baseUrl: 'https://api.spoor.example.com' });
 // 1. Check service health
 const health = await spoor.health();
 
-// 2. Start lookup
-const lookup = await spoor.startLookup('Voldigoade', 'fast');
+// 2. Start lookup (FAST with GitLeak enrichment enabled)
+const lookup = await spoor.startLookup('Voldigoade', 'fast', true);
 
 // 3. Stream real progress to your terminal UI
 const unsubscribe = spoor.streamEvents(
@@ -283,7 +292,7 @@ Spoor v0.1 server maintains active lookup states, SSE broadcast channels, and ep
 Direct clients connecting over public networks can trivially inject or manipulate `X-Forwarded-For` headers. To prevent IP rate-limiting bypass:
 
 * **Default Mode (Untrusted):** When `SPOOR_TRUSTED_PROXIES` is unset, Spoor uses the direct socket peer IP exclusively. All incoming `X-Forwarded-For` headers are strictly ignored.
-* **Trusted Reverse Proxy Mode:** When Spoor is deployed behind reverse proxies or CDNs (such as Nginx, Caddy, or Cloudflare), configure trusted proxy IPs or CIDR subnets via `SPOOR_TRUSTED_PROXIES` (e.g. `127.0.0.1, 10.0.0.0/8, 172.16.0.0/12`):
+* **Trusted Reverse Proxy Mode:** When Spoor is deployed behind reverse proxies or CDNs (such as Northflank ingress, Nginx, Caddy, or Cloudflare), configure trusted proxy IPs or CIDR subnets via `SPOOR_TRUSTED_PROXIES` (e.g. `10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.1`):
   * Spoor first verifies that the direct socket connection originates from a configured trusted proxy.
   * If trusted, Spoor inspects `X-Forwarded-For` from right to left (nearest proxy backwards), skipping intermediary trusted proxies and selecting the first untrusted upstream IP.
   * Any client-injected spoofed headers situated upstream of the trusted proxy are ignored.
@@ -292,7 +301,7 @@ Direct clients connecting over public networks can trivially inject or manipulat
 
 Cross-Origin Resource Sharing (CORS) is strictly restricted in production:
 
-* Set `SPOOR_ALLOWED_ORIGINS` to a comma-separated list of exact production origins (e.g. `https://voldigoade-portfolio.vercel.app`).
+* Set `SPOOR_ALLOWED_ORIGINS` to a comma-separated list of exact production origins (e.g. `https://voldigoade.xyz, https://voldigoade-portfolio.vercel.app`).
 * Wildcard origins (`*`) are disallowed in production deployments.
 * If `SPOOR_ALLOWED_ORIGINS` is unset, the server defaults to permitting only local development origins (`http://localhost`, `http://127.0.0.1`).
 

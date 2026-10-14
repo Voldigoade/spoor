@@ -9,6 +9,7 @@ export interface LookupMeta {
     id: string;
     target: string;
     mode: AnalysisMode;
+    enrich?: boolean;
     status: LookupStatus;
     created_at: string;
     error?: string;
@@ -163,7 +164,7 @@ export declare class SpoorClient {
         status: string;
         version: string;
     }>;
-    startLookup(target: string, mode?: AnalysisMode): Promise<LookupMeta>;
+    startLookup(target: string, mode?: AnalysisMode, enrich?: boolean): Promise<LookupMeta>;
     getLookup(id: string): Promise<LookupMeta>;
     getReport(id: string): Promise<Report>;
     getExportUrl(id: string, format: ExportFormat): string;

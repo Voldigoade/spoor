@@ -18,13 +18,17 @@ class SpoorClient {
         }
         return res.json();
     }
-    async startLookup(target, mode = 'fast') {
+    async startLookup(target, mode = 'fast', enrich) {
+        const payload = { target, mode };
+        if (enrich !== undefined) {
+            payload.enrich = enrich;
+        }
         const res = await fetch(`${this.baseUrl}/v1/lookups`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
             },
-            body: JSON.stringify({ target, mode }),
+            body: JSON.stringify(payload),
         });
         if (!res.ok) {
             const err = await res.json().catch(() => ({ error: res.statusText }));

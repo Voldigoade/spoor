@@ -12,6 +12,7 @@ export interface LookupMeta {
   id: string;
   target: string;
   mode: AnalysisMode;
+  enrich?: boolean;
   status: LookupStatus;
   created_at: string;
   error?: string;
@@ -190,13 +191,25 @@ export class SpoorClient {
     return res.json();
   }
 
-  async startLookup(target: string, mode: AnalysisMode = 'fast'): Promise<LookupMeta> {
+  async startLookup(
+    target: string,
+    mode: AnalysisMode = 'fast',
+    enrich?: boolean
+  ): Promise<LookupMeta> {
+    const payload: { target: string; mode: AnalysisMode; enrich?: boolean } = {
+      target,
+      mode,
+    };
+    if (enrich !== undefined) {
+      payload.enrich = enrich;
+    }
+
     const res = await fetch(`${this.baseUrl}/v1/lookups`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ target, mode }),
+      body: JSON.stringify(payload),
     });
 
     if (!res.ok) {

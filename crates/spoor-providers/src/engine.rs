@@ -4,16 +4,16 @@ use std::time::Instant;
 
 use chrono::Utc;
 use spoor_core::{
-    classify_email, ActivityEventSummary, ActivityReport, AnalysisMode, CacheStore, Classification,
-    CoverageRecord, IdentityRecord, InferenceRecord, KeyRecord, KeyType, ProfileReport, Provenance,
-    ProviderHealth, ProviderStatus, RepoHygiene, RepoReport, Report, ReportSummary, SpoorError,
-    SpoorEvent, Target,
+    classify_email, ActivityEventSummary, ActivityReport, AnalysisMode, AnalysisOptions,
+    CacheStore, Classification, CoverageRecord, IdentityRecord, InferenceRecord, KeyRecord,
+    KeyType, ProfileReport, Provenance, ProviderHealth, ProviderStatus, RepoHygiene, RepoReport,
+    Report, ReportSummary, SpoorError, SpoorEvent, Target,
 };
 use tokio::sync::mpsc::Sender;
 
 use crate::github::models::{GhCommitItem, GhRepo};
 use crate::github::GitHubProvider;
-use crate::gitleak::{GitLeakClient, GitLeakOutcome, GitLeakResponse};
+use crate::gitleak::{GitLeakBudget, GitLeakClient, GitLeakOutcome, GitLeakResponse};
 use crate::hygiene::detect_hygiene_from_paths;
 
 fn extract_repo_from_commit_url(url: &str) -> Option<String> {
@@ -37,6 +37,7 @@ type ScannedRepoMeta = (Option<HashMap<String, u64>>, Option<RepoHygiene>);
 pub struct AnalysisEngine {
     github: GitHubProvider,
     gitleak: GitLeakClient,
+    gitleak_budget: GitLeakBudget,
     cache: Arc<dyn CacheStore>,
 }
 
@@ -45,6 +46,21 @@ impl AnalysisEngine {
         Self {
             github,
             gitleak,
+            gitleak_budget: GitLeakBudget::from_env(),
+            cache,
+        }
+    }
+
+    pub fn with_budget(
+        github: GitHubProvider,
+        gitleak: GitLeakClient,
+        gitleak_budget: GitLeakBudget,
+        cache: Arc<dyn CacheStore>,
+    ) -> Self {
+        Self {
+            github,
+            gitleak,
+            gitleak_budget,
             cache,
         }
     }
@@ -58,16 +74,17 @@ impl AnalysisEngine {
     pub async fn run_analysis(
         &self,
         target: &Target,
-        mode: AnalysisMode,
+        options: impl Into<AnalysisOptions>,
         event_tx: Option<Sender<SpoorEvent>>,
     ) -> Result<Report, SpoorError> {
+        let options = options.into();
         let start_time = Instant::now();
 
         Self::emit(
             &event_tx,
             SpoorEvent::LookupStarted {
                 target: target.display_name(),
-                mode: mode.to_string(),
+                mode: options.mode.to_string(),
             },
         )
         .await;
@@ -86,8 +103,13 @@ impl AnalysisEngine {
         )
         .await;
 
-        // Check full report cache
-        let cache_key = format!("report:{}:{}", target.display_name(), mode);
+        // Check full report cache (key differentiates analysis depth and enrichment)
+        let cache_key = format!(
+            "report:{}:{}:enrich={}",
+            target.display_name(),
+            options.mode,
+            options.enrich
+        );
         if let Ok(Some(cached_json)) = self.cache.get("spoor", &cache_key, "v2").await {
             if let Ok(mut cached_report) = serde_json::from_str::<Report>(&cached_json) {
                 Self::emit(
@@ -116,12 +138,15 @@ impl AnalysisEngine {
         }
 
         let report = match target {
-            Target::User { username } => self.analyze_user(username, mode, &event_tx).await?,
-            Target::Repo { owner, repo } => self.analyze_repo(owner, repo, mode, &event_tx).await?,
+            Target::User { username } => self.analyze_user(username, options, &event_tx).await?,
+            Target::Repo { owner, repo } => {
+                self.analyze_repo(owner, repo, options.mode, &event_tx)
+                    .await?
+            }
         };
 
         // Cache completed report (FAST for 1 hour, DEEP for 6 hours)
-        let ttl_secs = match mode {
+        let ttl_secs = match options.mode {
             AnalysisMode::Fast => 3600,
             AnalysisMode::Deep => 21600,
         };
@@ -146,14 +171,14 @@ impl AnalysisEngine {
     async fn analyze_user(
         &self,
         username: &str,
-        mode: AnalysisMode,
+        options: AnalysisOptions,
         event_tx: &Option<Sender<SpoorEvent>>,
     ) -> Result<Report, SpoorError> {
         let mut report = Report::new(
             Target::User {
                 username: username.to_string(),
             },
-            mode,
+            options.mode,
         );
 
         // 1. Fetch GitHub Profile
@@ -235,7 +260,7 @@ impl AnalysisEngine {
         );
 
         // 2. Fetch Repositories
-        let max_repos = match mode {
+        let max_repos = match options.mode {
             AnalysisMode::Fast => 30,
             AnalysisMode::Deep => 100,
         };
@@ -278,7 +303,7 @@ impl AnalysisEngine {
         );
 
         // 3. Commit Scanning Budget & Repository Inspection
-        let (repo_scan_limit, commit_per_repo_limit) = match mode {
+        let (repo_scan_limit, commit_per_repo_limit) = match options.mode {
             AnalysisMode::Fast => (3, 30),
             AnalysisMode::Deep => (8, 50),
         };
@@ -506,9 +531,9 @@ impl AnalysisEngine {
         }
         activity_report.active_repositories = active_repos_set.into_iter().collect();
 
-        // 6. GitLeak Enrichment (DEEP mode or cached)
+        // 6. GitLeak Enrichment (if enrich=true, or cached)
         let mut gitleak_data: Option<GitLeakResponse> = None;
-        if mode == AnalysisMode::Deep {
+        if options.enrich {
             Self::emit(
                 event_tx,
                 SpoorEvent::ProviderStarted {
@@ -539,39 +564,137 @@ impl AnalysisEngine {
             }
 
             if gitleak_data.is_none() {
-                let gl_outcome = self.gitleak.lookup(username, false, true).await?;
-                match gl_outcome {
-                    GitLeakOutcome::Success(resp) => {
-                        if let Ok(s) = serde_json::to_string(&resp) {
-                            let _ = self
-                                .cache
-                                .set("gitleak", &gitleak_cache_key, "v2", &s, 86400)
-                                .await;
+                match self.gitleak_budget.try_acquire().await {
+                    Ok(()) => {
+                        let gl_outcome = self.gitleak.lookup(username, false, true).await?;
+                        match gl_outcome {
+                            GitLeakOutcome::Success(resp) => {
+                                if let Ok(s) = serde_json::to_string(&resp) {
+                                    let _ = self
+                                        .cache
+                                        .set("gitleak", &gitleak_cache_key, "v2", &s, 86400)
+                                        .await;
+                                }
+                                report.provider_status.insert(
+                                    "GitLeak".to_string(),
+                                    ProviderStatus {
+                                        status: ProviderHealth::Ok,
+                                        latency_ms: resp
+                                            .metadata
+                                            .as_ref()
+                                            .and_then(|m| m.execution_time_ms),
+                                        items_retrieved: Some(resp.emails.len()),
+                                        rate_limit_remaining: Some(
+                                            self.gitleak_budget.remaining().await as u64,
+                                        ),
+                                        rate_limit_reset: None,
+                                        retry_after_seconds: None,
+                                        message: None,
+                                    },
+                                );
+                                gitleak_data = Some(*resp);
+                            }
+                            GitLeakOutcome::RateLimited {
+                                retry_after,
+                                message,
+                            } => {
+                                report
+                                    .warnings
+                                    .push(format!("GitLeak rate limited: {message}"));
+                                report.provider_status.insert(
+                                    "GitLeak".to_string(),
+                                    ProviderStatus {
+                                        status: ProviderHealth::RateLimited,
+                                        latency_ms: None,
+                                        items_retrieved: Some(0),
+                                        rate_limit_remaining: Some(0),
+                                        rate_limit_reset: None,
+                                        retry_after_seconds: retry_after,
+                                        message: Some(message),
+                                    },
+                                );
+                            }
+                            GitLeakOutcome::NoActivity => {
+                                report.provider_status.insert(
+                                    "GitLeak".to_string(),
+                                    ProviderStatus {
+                                        status: ProviderHealth::Ok,
+                                        latency_ms: None,
+                                        items_retrieved: Some(0),
+                                        rate_limit_remaining: Some(
+                                            self.gitleak_budget.remaining().await as u64,
+                                        ),
+                                        rate_limit_reset: None,
+                                        retry_after_seconds: None,
+                                        message: Some(
+                                            "No public commit activity found by GitLeak"
+                                                .to_string(),
+                                        ),
+                                    },
+                                );
+                            }
+                            GitLeakOutcome::NotFound => {
+                                report.provider_status.insert(
+                                    "GitLeak".to_string(),
+                                    ProviderStatus {
+                                        status: ProviderHealth::Unavailable,
+                                        latency_ms: None,
+                                        items_retrieved: None,
+                                        rate_limit_remaining: Some(
+                                            self.gitleak_budget.remaining().await as u64,
+                                        ),
+                                        rate_limit_reset: None,
+                                        retry_after_seconds: None,
+                                        message: Some(
+                                            "Target user not found in GitLeak index".to_string(),
+                                        ),
+                                    },
+                                );
+                            }
+                            GitLeakOutcome::TimedOut => {
+                                report
+                                    .warnings
+                                    .push("GitLeak lookup timed out (8s limit)".to_string());
+                                report.provider_status.insert(
+                                    "GitLeak".to_string(),
+                                    ProviderStatus {
+                                        status: ProviderHealth::Unavailable,
+                                        latency_ms: None,
+                                        items_retrieved: None,
+                                        rate_limit_remaining: Some(
+                                            self.gitleak_budget.remaining().await as u64,
+                                        ),
+                                        rate_limit_reset: None,
+                                        retry_after_seconds: None,
+                                        message: Some(
+                                            "Upstream GitLeak 8-second timeout exceeded"
+                                                .to_string(),
+                                        ),
+                                    },
+                                );
+                            }
+                            GitLeakOutcome::Unavailable(msg) => {
+                                report.warnings.push(format!("GitLeak unavailable: {msg}"));
+                                report.provider_status.insert(
+                                    "GitLeak".to_string(),
+                                    ProviderStatus {
+                                        status: ProviderHealth::Unavailable,
+                                        latency_ms: None,
+                                        items_retrieved: None,
+                                        rate_limit_remaining: Some(
+                                            self.gitleak_budget.remaining().await as u64,
+                                        ),
+                                        rate_limit_reset: None,
+                                        retry_after_seconds: None,
+                                        message: Some(msg),
+                                    },
+                                );
+                            }
                         }
-                        report.provider_status.insert(
-                            "GitLeak".to_string(),
-                            ProviderStatus {
-                                status: ProviderHealth::Ok,
-                                latency_ms: resp
-                                    .metadata
-                                    .as_ref()
-                                    .and_then(|m| m.execution_time_ms),
-                                items_retrieved: Some(resp.emails.len()),
-                                rate_limit_remaining: None,
-                                rate_limit_reset: None,
-                                retry_after_seconds: None,
-                                message: None,
-                            },
-                        );
-                        gitleak_data = Some(*resp);
                     }
-                    GitLeakOutcome::RateLimited {
-                        retry_after,
-                        message,
-                    } => {
-                        report
-                            .warnings
-                            .push(format!("GitLeak rate limited: {message}"));
+                    Err(retry_after) => {
+                        let msg = "GitLeak provider hourly budget exhausted; skipped to preserve upstream quota".to_string();
+                        report.warnings.push(msg.clone());
                         report.provider_status.insert(
                             "GitLeak".to_string(),
                             ProviderStatus {
@@ -580,71 +703,7 @@ impl AnalysisEngine {
                                 items_retrieved: Some(0),
                                 rate_limit_remaining: Some(0),
                                 rate_limit_reset: None,
-                                retry_after_seconds: retry_after,
-                                message: Some(message),
-                            },
-                        );
-                    }
-                    GitLeakOutcome::NoActivity => {
-                        report.provider_status.insert(
-                            "GitLeak".to_string(),
-                            ProviderStatus {
-                                status: ProviderHealth::Ok,
-                                latency_ms: None,
-                                items_retrieved: Some(0),
-                                rate_limit_remaining: None,
-                                rate_limit_reset: None,
-                                retry_after_seconds: None,
-                                message: Some(
-                                    "No public commit activity found by GitLeak".to_string(),
-                                ),
-                            },
-                        );
-                    }
-                    GitLeakOutcome::NotFound => {
-                        report.provider_status.insert(
-                            "GitLeak".to_string(),
-                            ProviderStatus {
-                                status: ProviderHealth::Unavailable,
-                                latency_ms: None,
-                                items_retrieved: None,
-                                rate_limit_remaining: None,
-                                rate_limit_reset: None,
-                                retry_after_seconds: None,
-                                message: Some("Target user not found in GitLeak index".to_string()),
-                            },
-                        );
-                    }
-                    GitLeakOutcome::TimedOut => {
-                        report
-                            .warnings
-                            .push("GitLeak lookup timed out (8s limit)".to_string());
-                        report.provider_status.insert(
-                            "GitLeak".to_string(),
-                            ProviderStatus {
-                                status: ProviderHealth::Unavailable,
-                                latency_ms: None,
-                                items_retrieved: None,
-                                rate_limit_remaining: None,
-                                rate_limit_reset: None,
-                                retry_after_seconds: None,
-                                message: Some(
-                                    "Upstream GitLeak 8-second timeout exceeded".to_string(),
-                                ),
-                            },
-                        );
-                    }
-                    GitLeakOutcome::Unavailable(msg) => {
-                        report.warnings.push(format!("GitLeak unavailable: {msg}"));
-                        report.provider_status.insert(
-                            "GitLeak".to_string(),
-                            ProviderStatus {
-                                status: ProviderHealth::Unavailable,
-                                latency_ms: None,
-                                items_retrieved: None,
-                                rate_limit_remaining: None,
-                                rate_limit_reset: None,
-                                retry_after_seconds: None,
+                                retry_after_seconds: Some(retry_after),
                                 message: Some(msg),
                             },
                         );
@@ -652,7 +711,7 @@ impl AnalysisEngine {
                 }
             }
         } else {
-            // FAST mode skips GitLeak to preserve quota
+            // enrich == false: skip GitLeak to preserve quota
             report.provider_status.insert(
                 "GitLeak".to_string(),
                 ProviderStatus {
@@ -662,7 +721,7 @@ impl AnalysisEngine {
                     rate_limit_remaining: None,
                     rate_limit_reset: None,
                     retry_after_seconds: None,
-                    message: Some("Skipped in FAST mode to preserve rate-limit quota".to_string()),
+                    message: Some("Skipped to preserve rate-limit quota".to_string()),
                 },
             );
         }
@@ -1027,8 +1086,8 @@ impl AnalysisEngine {
             repositories_total: gh_user.public_repos as usize,
             is_partial,
             notes: Some(format!(
-                "Scanned {repos_scanned_count} of {} public repositories with a budget limit of {commit_per_repo_limit} commits per repo in {mode} mode",
-                gh_user.public_repos
+                "Scanned {repos_scanned_count} of {} public repositories with a budget limit of {commit_per_repo_limit} commits per repo in {} mode",
+                gh_user.public_repos, options.mode
             )),
         };
 

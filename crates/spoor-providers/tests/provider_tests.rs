@@ -3,8 +3,10 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use spoor_core::email::EmailType;
-use spoor_core::{AnalysisMode, NoopCacheStore, Target};
-use spoor_providers::{AnalysisEngine, GitHubProvider, GitLeakClient, GitLeakOutcome, HttpClient};
+use spoor_core::{AnalysisMode, AnalysisOptions, NoopCacheStore, ProviderHealth, Target};
+use spoor_providers::{
+    AnalysisEngine, GitHubProvider, GitLeakBudget, GitLeakClient, GitLeakOutcome, HttpClient,
+};
 
 #[tokio::test]
 async fn test_github_rest_user_mock() {
@@ -602,4 +604,226 @@ fn test_recompute_summary_mathematical_consistency() {
         report.summary.primary_languages,
         vec![("Rust".to_string(), 2)]
     );
+}
+
+#[tokio::test]
+async fn test_engine_fast_mode_enrich_semantics() {
+    let gh_mock = MockServer::start().await;
+    let gl_mock = MockServer::start().await;
+
+    let user_json = r#"{
+        "login": "carol",
+        "id": 9999,
+        "avatar_url": "https://avatars.githubusercontent.com/u/9999",
+        "html_url": "https://github.com/carol",
+        "name": "Carol Analyst",
+        "created_at": "2020-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "public_repos": 1
+    }"#;
+
+    let repos_json = r#"[
+        {
+            "name": "data-repo",
+            "full_name": "carol/data-repo",
+            "html_url": "https://github.com/carol/data-repo",
+            "default_branch": "main",
+            "fork": false,
+            "stargazers_count": 10,
+            "forks_count": 2,
+            "size": 100,
+            "language": "Python",
+            "open_issues_count": 0
+        }
+    ]"#;
+
+    let gitleak_json = r#"{
+        "emails": [
+            {
+                "email": "carol@secops.io",
+                "committer": "Carol Analyst",
+                "commitUrl": "https://github.com/carol/data-repo/commit/123456"
+            }
+        ],
+        "metadata": {
+            "totalCommitsProcessed": 5,
+            "emailsFound": 1,
+            "executionTimeMs": 120
+        }
+    }"#;
+
+    Mock::given(method("GET"))
+        .and(path("/users/carol"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(user_json))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/carol/repos"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(repos_json))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/repos/carol/data-repo/commits"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/repos/carol/data-repo/languages"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"Python": 5000}"#))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/repos/carol/data-repo/git/trees/main"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"tree": []}"#))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/carol/gpg_keys"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/carol/keys"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/carol/events/public"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/users/carol"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(gitleak_json))
+        .mount(&gl_mock)
+        .await;
+
+    let http = HttpClient::new();
+    let gh_provider = GitHubProvider::new(http.clone(), None, Some(gh_mock.uri()), None);
+    let gl_client = GitLeakClient::new(http, Some(gl_mock.uri()));
+    let cache = Arc::new(NoopCacheStore);
+
+    let engine = AnalysisEngine::new(gh_provider, gl_client, cache);
+    let target = Target::parse("carol").unwrap();
+
+    // 1. FAST with enrich: false -> GitLeak is skipped
+    let report_fast = engine
+        .run_analysis(&target, AnalysisOptions::fast(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        report_fast.provider_status.get("GitLeak").unwrap().status,
+        ProviderHealth::Skipped
+    );
+
+    // 2. FAST with enrich: true -> GitLeak is executed and identities merged, while repo bounds remain FAST
+    let report_enriched = engine
+        .run_analysis(&target, AnalysisOptions::fast_enriched(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        report_enriched
+            .provider_status
+            .get("GitLeak")
+            .unwrap()
+            .status,
+        ProviderHealth::Ok
+    );
+    let carol_id = report_enriched
+        .identities
+        .iter()
+        .find(|i| i.email == "carol@secops.io");
+    assert!(
+        carol_id.is_some(),
+        "GitLeak email must be merged into identities"
+    );
+}
+
+#[tokio::test]
+async fn test_gitleak_budget_exhaustion_in_engine() {
+    let gh_mock = MockServer::start().await;
+    let gl_mock = MockServer::start().await;
+
+    let user_json = r#"{
+        "login": "dave",
+        "id": 1111,
+        "avatar_url": "https://avatars.githubusercontent.com/u/1111",
+        "html_url": "https://github.com/dave",
+        "name": "Dave Developer",
+        "created_at": "2021-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "public_repos": 0
+    }"#;
+
+    Mock::given(method("GET"))
+        .and(path("/users/dave"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(user_json))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/dave/repos"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/dave/gpg_keys"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/dave/keys"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/dave/events/public"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+
+    let http = HttpClient::new();
+    let gh_provider = GitHubProvider::new(http.clone(), None, Some(gh_mock.uri()), None);
+    let gl_client = GitLeakClient::new(http, Some(gl_mock.uri()));
+    let cache = Arc::new(NoopCacheStore);
+
+    // GitLeak budget is strictly 0 requests
+    let budget = GitLeakBudget::new(0, 60);
+
+    let engine = AnalysisEngine::with_budget(gh_provider, gl_client, budget, cache);
+    let target = Target::parse("dave").unwrap();
+
+    let report = engine
+        .run_analysis(&target, AnalysisOptions::fast_enriched(), None)
+        .await
+        .unwrap();
+
+    // Verify lookup still succeeded with GitHub data
+    assert_eq!(report.summary.display_name, "Dave Developer");
+
+    // Verify GitLeak status is RateLimited with hourly budget message
+    let gl_status = report.provider_status.get("GitLeak").unwrap();
+    assert_eq!(gl_status.status, ProviderHealth::RateLimited);
+    assert!(gl_status
+        .message
+        .as_ref()
+        .unwrap()
+        .contains("GitLeak provider hourly budget exhausted"));
+
+    // Verify report warnings records the budget event
+    assert!(report
+        .warnings
+        .iter()
+        .any(|w| w.contains("GitLeak provider hourly budget exhausted")));
 }

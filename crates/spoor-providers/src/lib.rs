@@ -9,7 +9,7 @@ pub use engine::AnalysisEngine;
 pub use github::models as gh_models;
 pub use github::GitHubProvider;
 pub use gitleak::models as gl_models;
-pub use gitleak::{GitLeakClient, GitLeakOutcome};
+pub use gitleak::{GitLeakBudget, GitLeakClient, GitLeakOutcome};
 pub use hygiene::detect_hygiene_from_paths;
 
 pub fn version() -> &'static str {

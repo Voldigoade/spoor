@@ -18,7 +18,7 @@ pub use report::{
     InferenceRecord, KeyRecord, KeyType, ProfileReport, ProviderHealth, ProviderStatus,
     RepoHygiene, RepoReport, Report, ReportSummary, SCHEMA_VERSION,
 };
-pub use target::{AnalysisMode, Target};
+pub use target::{AnalysisMode, AnalysisOptions, Target};
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

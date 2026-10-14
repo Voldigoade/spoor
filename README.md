@@ -73,14 +73,14 @@ Input validation enforces strict hostname checking (`github.com` or `www.github.
 
 ## Analysis Modes
 
-* **FAST (Default):** Tailored for interactive CLI and web terminal embedding. Uses cached data aggressively, queries GitHub REST and GraphQL, bounds commit inspection to top repositories, and skips GitLeak to preserve quota.
-* **DEEP (`--deep`):** Broader footprint analysis. Widens commit sampling and requests GitLeak identity and activity heatmap enrichment.
+* **FAST (Default):** Tailored for interactive CLI and web terminal embedding. Uses cached data aggressively, queries GitHub REST and GraphQL, bounds commit inspection to top repositories. On the HTTP server, optional provider enrichment can be requested with `"enrich": true`.
+* **DEEP (`--deep`):** Full footprint analysis. Widens commit sampling and requests GitLeak identity and activity heatmap enrichment. (Disabled by default on public HTTP instances to protect server resources).
 
 ---
 
 ## Installation & Build
 
-Requires current stable Rust (1.80+).
+Requires current stable Rust (1.85+ MSRV).
 
 ```bash
 # Clone repository
@@ -183,8 +183,12 @@ spoor serve --bind 127.0.0.1 --port 8080
 ### Operational Architecture & Production Hardening
 
 * **Single-Instance Replica:** Spoor v0.1 server maintains active lookups, SSE broadcasters, and IP rate-limiting in process-local memory. It must run as a single application replica (`replicas: 1`).
-* **Trusted Reverse Proxies:** By default, Spoor exclusively uses direct socket peer IPs for rate limiting and strictly ignores client-supplied `X-Forwarded-For` headers. When deployed behind reverse proxies, configure `--trusted-proxies` or `SPOOR_TRUSTED_PROXIES` (e.g. `127.0.0.1, 10.0.0.0/8`). Spoor validates the proxy peer and performs a secure right-to-left traversal to extract authentic client IPs.
-* **Production CORS:** Set `SPOOR_ALLOWED_ORIGINS` to a comma-separated list of exact production origins (e.g. `https://voldigoade-portfolio.vercel.app`). Wildcards are rejected in production.
+* **HTTP DEEP Gating:** Full unconstrained DEEP analysis over HTTP is disabled by default in production (`SPOOR_HTTP_DEEP_ENABLED=false`). Callers submitting `mode=deep` receive a structured `403 Forbidden` response.
+* **Dual-Layer Rate Limiting:** Enforces both per-IP limits (default 10 lookups/hour via `SPOOR_RATE_LIMIT_PER_IP`) and global instance limits (default 100 lookups/hour via `SPOOR_GLOBAL_RATE_LIMIT`). Requests breaching limits return `429 Too Many Requests` with a standard `Retry-After` header.
+* **GitLeak Upstream Quota Protection:** A process-local sliding window protects GitLeak from upstream quota exhaustion (default 40 requests/hour via `SPOOR_GITLEAK_BUDGET`). Cache hits (24h TTL) do not consume budget. On budget exhaustion, Spoor gracefully proceeds with GitHub metadata.
+* **In-Memory Retention (TTL):** Completed and failed lookups are evicted from process memory after `SPOOR_LOOKUP_RETENTION_SECS` (default 3600s). Pending and running lookups are never evicted.
+* **Trusted Reverse Proxies:** By default, Spoor exclusively uses direct socket peer IPs for rate limiting and strictly ignores client-supplied `X-Forwarded-For` headers. When deployed behind reverse proxies (e.g. Northflank ingress), configure `--trusted-proxies` or `SPOOR_TRUSTED_PROXIES` (e.g. `10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.1`). Spoor validates the proxy peer and performs a secure right-to-left traversal to extract authentic client IPs.
+* **Production CORS:** Set `SPOOR_ALLOWED_ORIGINS` to a comma-separated list of exact production origins (e.g. `https://voldigoade.xyz, https://voldigoade-portfolio.vercel.app`). Wildcards are rejected in production.
 
 For full API specifications, SSE event schemas, and reference client integration, see [`docs/EMBED.md`](docs/EMBED.md).
 
