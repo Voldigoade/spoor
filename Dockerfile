@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.80-slim-bookworm AS builder
+FROM rust:1.99-slim-bookworm AS builder
 
 WORKDIR /usr/src/spoor
 
