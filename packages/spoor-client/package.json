@@ -1,6 +1,6 @@
 {
   "name": "@spoor/client",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Zero-dependency TypeScript client for Spoor public GitHub footprint inspection API",
   "author": "Voldigoade",
   "main": "dist/index.js",

@@ -14,6 +14,25 @@ use tokio::sync::mpsc::Sender;
 use crate::github::models::{GhCommitItem, GhRepo};
 use crate::github::GitHubProvider;
 use crate::gitleak::{GitLeakClient, GitLeakOutcome, GitLeakResponse};
+use crate::hygiene::detect_hygiene_from_paths;
+
+fn extract_repo_from_commit_url(url: &str) -> Option<String> {
+    let stripped = url
+        .trim()
+        .strip_prefix("https://github.com/")
+        .or_else(|| url.trim().strip_prefix("http://github.com/"))
+        .or_else(|| url.trim().strip_prefix("github.com/"))?;
+    let mut parts = stripped.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if !owner.is_empty() && !repo.is_empty() {
+        Some(format!("{owner}/{repo}"))
+    } else {
+        None
+    }
+}
+
+type ScannedRepoMeta = (Option<HashMap<String, u64>>, Option<RepoHygiene>);
 
 pub struct AnalysisEngine {
     github: GitHubProvider,
@@ -69,7 +88,7 @@ impl AnalysisEngine {
 
         // Check full report cache
         let cache_key = format!("report:{}:{}", target.display_name(), mode);
-        if let Ok(Some(cached_json)) = self.cache.get("spoor", &cache_key, "v1").await {
+        if let Ok(Some(cached_json)) = self.cache.get("spoor", &cache_key, "v2").await {
             if let Ok(mut cached_report) = serde_json::from_str::<Report>(&cached_json) {
                 Self::emit(
                     &event_tx,
@@ -109,7 +128,7 @@ impl AnalysisEngine {
         if let Ok(serialized) = serde_json::to_string(&report) {
             let _ = self
                 .cache
-                .set("spoor", &cache_key, "v1", &serialized, ttl_secs)
+                .set("spoor", &cache_key, "v2", &serialized, ttl_secs)
                 .await;
         }
 
@@ -258,6 +277,71 @@ impl AnalysisEngine {
             },
         );
 
+        // 3. Commit Scanning Budget & Repository Inspection
+        let (repo_scan_limit, commit_per_repo_limit) = match mode {
+            AnalysisMode::Fast => (3, 30),
+            AnalysisMode::Deep => (8, 50),
+        };
+
+        // Filter non-fork repositories first for commit and hygiene analysis
+        let mut eligible_repos: Vec<&GhRepo> = gh_repos.iter().filter(|r| !r.fork).collect();
+        if eligible_repos.is_empty() {
+            eligible_repos = gh_repos.iter().collect();
+        }
+        eligible_repos.truncate(repo_scan_limit);
+
+        let mut raw_commits: Vec<(String, GhCommitItem)> = Vec::new();
+        let mut repos_scanned_count = 0;
+        let mut scanned_repo_meta: HashMap<String, ScannedRepoMeta> = HashMap::new();
+
+        for (idx, r) in eligible_repos.iter().enumerate() {
+            Self::emit(
+                event_tx,
+                SpoorEvent::ScanProgress {
+                    current: idx + 1,
+                    total: eligible_repos.len(),
+                    message: format!("Inspecting repository {}", r.full_name),
+                },
+            )
+            .await;
+
+            let commits = self
+                .github
+                .fetch_repository_commits(username, &r.name, commit_per_repo_limit)
+                .await
+                .unwrap_or_default();
+
+            if !commits.is_empty() {
+                repos_scanned_count += 1;
+                for c in commits {
+                    raw_commits.push((r.full_name.clone(), c));
+                }
+            }
+
+            let langs = self
+                .github
+                .fetch_repository_languages(username, &r.name)
+                .await
+                .ok();
+
+            let default_branch = r.default_branch.as_deref().unwrap_or("main");
+            let tree = self
+                .github
+                .fetch_repository_tree(username, &r.name, default_branch)
+                .await
+                .unwrap_or_default();
+
+            let hygiene = if !tree.tree.is_empty() {
+                Some(detect_hygiene_from_paths(
+                    tree.tree.iter().map(|item| item.path.as_str()),
+                ))
+            } else {
+                None
+            };
+
+            scanned_repo_meta.insert(r.full_name.clone(), (langs, hygiene));
+        }
+
         // Convert repositories to RepoReport
         let mut repo_reports = Vec::new();
         let mut total_stars = 0u64;
@@ -279,6 +363,11 @@ impl AnalysisEngine {
                 *language_counts.entry(lang.clone()).or_insert(0) += 1;
             }
 
+            let (langs, hyg) = match scanned_repo_meta.remove(&r.full_name) {
+                Some((l, h)) => (l, h),
+                None => (None, None),
+            };
+
             repo_reports.push(RepoReport {
                 name: r.name.clone(),
                 full_name: r.full_name.clone(),
@@ -291,54 +380,15 @@ impl AnalysisEngine {
                 open_issues: r.open_issues_count,
                 size_kb: r.size,
                 primary_language: r.language.clone(),
-                languages: HashMap::new(),
+                languages: langs,
                 created_at: r.created_at,
                 updated_at: r.updated_at,
                 pushed_at: r.pushed_at,
                 topics: r.topics.clone().unwrap_or_default(),
                 license_spdx: r.license.as_ref().and_then(|l| l.spdx_id.clone()),
-                hygiene: RepoHygiene::default(),
+                hygiene: hyg,
                 html_url: r.html_url.clone(),
             });
-        }
-
-        // 3. Commit Scanning Budget
-        let (repo_scan_limit, commit_per_repo_limit) = match mode {
-            AnalysisMode::Fast => (3, 30),
-            AnalysisMode::Deep => (8, 50),
-        };
-
-        // Filter non-fork repositories first for commit analysis
-        let mut eligible_repos: Vec<&GhRepo> = gh_repos.iter().filter(|r| !r.fork).collect();
-        if eligible_repos.is_empty() {
-            eligible_repos = gh_repos.iter().collect();
-        }
-        eligible_repos.truncate(repo_scan_limit);
-
-        let mut raw_commits: Vec<GhCommitItem> = Vec::new();
-        let mut repos_scanned_count = 0;
-
-        for (idx, r) in eligible_repos.iter().enumerate() {
-            Self::emit(
-                event_tx,
-                SpoorEvent::ScanProgress {
-                    current: idx + 1,
-                    total: eligible_repos.len(),
-                    message: format!("Inspecting commits in {}", r.full_name),
-                },
-            )
-            .await;
-
-            let commits = self
-                .github
-                .fetch_repository_commits(username, &r.name, commit_per_repo_limit)
-                .await
-                .unwrap_or_default();
-
-            if !commits.is_empty() {
-                repos_scanned_count += 1;
-                raw_commits.extend(commits);
-            }
         }
 
         // 4. Public Keys (GPG & SSH)
@@ -469,7 +519,7 @@ impl AnalysisEngine {
             .await;
 
             let gitleak_cache_key = format!("gitleak:{username}");
-            if let Ok(Some(cached_str)) = self.cache.get("gitleak", &gitleak_cache_key, "v1").await
+            if let Ok(Some(cached_str)) = self.cache.get("gitleak", &gitleak_cache_key, "v2").await
             {
                 if let Ok(resp) = serde_json::from_str::<GitLeakResponse>(&cached_str) {
                     report.provider_status.insert(
@@ -495,7 +545,7 @@ impl AnalysisEngine {
                         if let Ok(s) = serde_json::to_string(&resp) {
                             let _ = self
                                 .cache
-                                .set("gitleak", &gitleak_cache_key, "v1", &s, 86400)
+                                .set("gitleak", &gitleak_cache_key, "v2", &s, 86400)
                                 .await;
                         }
                         report.provider_status.insert(
@@ -513,7 +563,7 @@ impl AnalysisEngine {
                                 message: None,
                             },
                         );
-                        gitleak_data = Some(resp);
+                        gitleak_data = Some(*resp);
                     }
                     GitLeakOutcome::RateLimited {
                         retry_after,
@@ -641,61 +691,168 @@ impl AnalysisEngine {
         }
 
         // B. Commit metadata identities
-        for item in &raw_commits {
-            let author = &item.commit.author;
-            let committer = &item.commit.committer;
+        for (repo_full_name, item) in &raw_commits {
+            let author = item.commit.author.as_ref();
+            let committer = item.commit.committer.as_ref();
 
-            let candidates = [author.as_ref(), committer.as_ref()];
-            for actor in candidates.into_iter().flatten() {
-                let email_norm = actor.email.trim().to_lowercase();
-                if email_norm.is_empty() {
-                    continue;
-                }
+            let is_verified = item
+                .commit
+                .verification
+                .as_ref()
+                .is_some_and(|v| v.verified);
 
-                let is_verified = item
-                    .commit
-                    .verification
-                    .as_ref()
-                    .is_some_and(|v| v.verified);
+            let author_email = author.map(|a| a.email.trim()).filter(|e| !e.is_empty());
+            let committer_email = committer.map(|c| c.email.trim()).filter(|e| !e.is_empty());
 
-                let entry =
-                    identities_map
-                        .entry(email_norm.clone())
+            match (author_email, committer_email) {
+                (Some(a_email), Some(c_email)) if a_email.eq_ignore_ascii_case(c_email) => {
+                    // Author and committer are the same identity: count commit once, emit single provenance
+                    let a_actor = author.unwrap();
+                    let norm = a_email.to_lowercase();
+                    let entry = identities_map
+                        .entry(norm)
                         .or_insert_with(|| IdentityRecord {
-                            name: Some(actor.name.clone()),
-                            email: actor.email.trim().to_string(),
+                            name: Some(a_actor.name.clone()),
+                            email: a_actor.email.trim().to_string(),
                             email_type: classify_email(
-                                &actor.email,
+                                &a_actor.email,
                                 profile_report.public_email.as_deref(),
                             ),
-                            first_seen: actor.date,
-                            last_seen: actor.date,
+                            first_seen: a_actor.date,
+                            last_seen: a_actor.date,
                             commits_observed: 0,
                             repositories: Vec::new(),
                             sources: vec!["Public Git Commit Metadata".to_string()],
                             is_verified_signer: false,
                         });
 
-                entry.commits_observed += 1;
-                if is_verified {
-                    entry.is_verified_signer = true;
-                }
-                if let Some(d) = actor.date {
-                    if entry.first_seen.is_none_or(|existing| d < existing) {
-                        entry.first_seen = Some(d);
+                    entry.commits_observed += 1;
+                    if is_verified {
+                        entry.is_verified_signer = true;
                     }
-                    if entry.last_seen.is_none_or(|existing| d > existing) {
-                        entry.last_seen = Some(d);
+                    if !entry.repositories.contains(repo_full_name) {
+                        entry.repositories.push(repo_full_name.clone());
                     }
-                }
+                    if let Some(d) = a_actor.date {
+                        if entry.first_seen.is_none_or(|existing| d < existing) {
+                            entry.first_seen = Some(d);
+                        }
+                        if entry.last_seen.is_none_or(|existing| d > existing) {
+                            entry.last_seen = Some(d);
+                        }
+                    }
 
-                // Add source commit for provenance
-                report.provenance.push(
-                    Provenance::new("Git Commit Metadata", Classification::Observed)
-                        .with_source_url(&item.html_url)
-                        .with_commit(&item.sha)
-                        .with_notes(format!("Email observed in commit: {}", actor.email)),
-                );
+                    report.provenance.push(
+                        Provenance::new("Git Commit Metadata", Classification::Observed)
+                            .with_source_url(&item.html_url)
+                            .with_repository(repo_full_name)
+                            .with_commit(&item.sha)
+                            .with_notes(format!(
+                                "Email observed as author & committer: {}",
+                                a_actor.email
+                            )),
+                    );
+                }
+                _ => {
+                    // Process author and committer individually if distinct
+                    if let Some(a_actor) = author {
+                        let email_norm = a_actor.email.trim().to_lowercase();
+                        if !email_norm.is_empty() {
+                            let entry = identities_map.entry(email_norm).or_insert_with(|| {
+                                IdentityRecord {
+                                    name: Some(a_actor.name.clone()),
+                                    email: a_actor.email.trim().to_string(),
+                                    email_type: classify_email(
+                                        &a_actor.email,
+                                        profile_report.public_email.as_deref(),
+                                    ),
+                                    first_seen: a_actor.date,
+                                    last_seen: a_actor.date,
+                                    commits_observed: 0,
+                                    repositories: Vec::new(),
+                                    sources: vec!["Public Git Commit Metadata".to_string()],
+                                    is_verified_signer: false,
+                                }
+                            });
+
+                            entry.commits_observed += 1;
+                            if is_verified {
+                                entry.is_verified_signer = true;
+                            }
+                            if !entry.repositories.contains(repo_full_name) {
+                                entry.repositories.push(repo_full_name.clone());
+                            }
+                            if let Some(d) = a_actor.date {
+                                if entry.first_seen.is_none_or(|existing| d < existing) {
+                                    entry.first_seen = Some(d);
+                                }
+                                if entry.last_seen.is_none_or(|existing| d > existing) {
+                                    entry.last_seen = Some(d);
+                                }
+                            }
+
+                            report.provenance.push(
+                                Provenance::new("Git Commit Metadata", Classification::Observed)
+                                    .with_source_url(&item.html_url)
+                                    .with_repository(repo_full_name)
+                                    .with_commit(&item.sha)
+                                    .with_notes(format!(
+                                        "Email observed as author: {}",
+                                        a_actor.email
+                                    )),
+                            );
+                        }
+                    }
+
+                    if let Some(c_actor) = committer {
+                        let email_norm = c_actor.email.trim().to_lowercase();
+                        if !email_norm.is_empty() {
+                            let entry = identities_map.entry(email_norm).or_insert_with(|| {
+                                IdentityRecord {
+                                    name: Some(c_actor.name.clone()),
+                                    email: c_actor.email.trim().to_string(),
+                                    email_type: classify_email(
+                                        &c_actor.email,
+                                        profile_report.public_email.as_deref(),
+                                    ),
+                                    first_seen: c_actor.date,
+                                    last_seen: c_actor.date,
+                                    commits_observed: 0,
+                                    repositories: Vec::new(),
+                                    sources: vec!["Public Git Commit Metadata".to_string()],
+                                    is_verified_signer: false,
+                                }
+                            });
+
+                            entry.commits_observed += 1;
+                            if is_verified {
+                                entry.is_verified_signer = true;
+                            }
+                            if !entry.repositories.contains(repo_full_name) {
+                                entry.repositories.push(repo_full_name.clone());
+                            }
+                            if let Some(d) = c_actor.date {
+                                if entry.first_seen.is_none_or(|existing| d < existing) {
+                                    entry.first_seen = Some(d);
+                                }
+                                if entry.last_seen.is_none_or(|existing| d > existing) {
+                                    entry.last_seen = Some(d);
+                                }
+                            }
+
+                            report.provenance.push(
+                                Provenance::new("Git Commit Metadata", Classification::Observed)
+                                    .with_source_url(&item.html_url)
+                                    .with_repository(repo_full_name)
+                                    .with_commit(&item.sha)
+                                    .with_notes(format!(
+                                        "Email observed as committer: {}",
+                                        c_actor.email
+                                    )),
+                            );
+                        }
+                    }
+                }
             }
         }
 
@@ -703,6 +860,15 @@ impl AnalysisEngine {
         if let Some(gl) = &gitleak_data {
             for email_entry in &gl.emails {
                 let norm = email_entry.email.trim().to_lowercase();
+                if norm.is_empty() {
+                    continue;
+                }
+
+                let extracted_repo = email_entry
+                    .commit_url
+                    .as_deref()
+                    .and_then(extract_repo_from_commit_url);
+
                 let entry = identities_map
                     .entry(norm)
                     .or_insert_with(|| IdentityRecord {
@@ -724,12 +890,82 @@ impl AnalysisEngine {
                     entry.sources.push("GitLeak".to_string());
                 }
 
+                if entry.name.is_none() && email_entry.committer.is_some() {
+                    entry.name = email_entry.committer.clone();
+                }
+
+                if entry.commits_observed == 0 {
+                    entry.commits_observed = 1;
+                }
+
+                if let Some(repo) = &extracted_repo {
+                    if !entry.repositories.contains(repo) {
+                        entry.repositories.push(repo.clone());
+                    }
+                }
+
                 if let Some(commit_url) = &email_entry.commit_url {
-                    report.provenance.push(
-                        Provenance::new("GitLeak", Classification::Observed)
-                            .with_source_url(commit_url)
-                            .with_notes("Email identified via GitLeak enrichment"),
-                    );
+                    let mut prov = Provenance::new("GitLeak", Classification::Observed)
+                        .with_source_url(commit_url)
+                        .with_notes(format!(
+                            "Email observed via GitLeak commit: {}",
+                            email_entry.email
+                        ));
+                    if let Some(repo) = &extracted_repo {
+                        prov = prov.with_repository(repo);
+                    }
+                    report.provenance.push(prov);
+                }
+            }
+
+            // Reconcile GitLeak GPG & SSH keys
+            if let Some(meta) = &gl.metadata {
+                for gpg in &meta.gpg_keys {
+                    let key_id = gpg
+                        .get("keyId")
+                        .or(gpg.get("key_id"))
+                        .and_then(|v| v.as_str());
+                    if let Some(kid) = key_id {
+                        let exists = key_records.iter().any(|k| k.key_id.as_deref() == Some(kid));
+                        if !exists {
+                            key_records.push(KeyRecord {
+                                key_type: KeyType::Gpg,
+                                key_id: Some(kid.to_string()),
+                                fingerprint: Some(kid.to_string()),
+                                raw_preview: format!("GPG Key ID: {kid}"),
+                                emails: Vec::new(),
+                                created_at: None,
+                                expires_at: None,
+                                can_sign: Some(true),
+                                source: "GitLeak Metadata".to_string(),
+                            });
+                        }
+                    }
+                }
+
+                for ssh in &meta.ssh_keys {
+                    let fp = ssh
+                        .get("fingerprint")
+                        .or(ssh.get("id"))
+                        .and_then(|v| v.as_str());
+                    if let Some(f) = fp {
+                        let exists = key_records.iter().any(|k| {
+                            k.fingerprint.as_deref() == Some(f) || k.key_id.as_deref() == Some(f)
+                        });
+                        if !exists {
+                            key_records.push(KeyRecord {
+                                key_type: KeyType::Ssh,
+                                key_id: Some(f.to_string()),
+                                fingerprint: Some(f.to_string()),
+                                raw_preview: format!("SSH Key: {f}"),
+                                emails: Vec::new(),
+                                created_at: None,
+                                expires_at: None,
+                                can_sign: Some(true),
+                                source: "GitLeak Metadata".to_string(),
+                            });
+                        }
+                    }
                 }
             }
 
@@ -754,6 +990,12 @@ impl AnalysisEngine {
                     }
                 }
             }
+        }
+
+        // Sort and deduplicate repositories for all identities
+        for id in identities_map.values_mut() {
+            id.repositories.sort();
+            id.repositories.dedup();
         }
 
         // Collect sorted identities
@@ -812,6 +1054,8 @@ impl AnalysisEngine {
         report.activity = activity_report;
         report.identities = identities;
         report.keys = key_records;
+
+        report.recompute_summary();
 
         Ok(report)
     }
@@ -883,22 +1127,31 @@ impl AnalysisEngine {
             .await
             .unwrap_or_default();
 
-        // Community hygiene profile
-        let community = self
+        // Repository file tree for accurate hygiene detection
+        let default_branch = gh_repo.default_branch.as_deref().unwrap_or("main");
+        let tree = self
             .github
-            .fetch_repository_community_profile(owner, repo)
+            .fetch_repository_tree(owner, repo, default_branch)
             .await
             .unwrap_or_default();
-
-        let files = community.files.unwrap_or_default();
-        let hygiene = RepoHygiene {
-            has_readme: files.readme.is_some(),
-            has_license: files.license.is_some(),
-            has_security_policy: files.security.is_some(),
-            has_contributing: files.contributing.is_some(),
-            has_codeowners: false,
-            has_actions_ci: true,
-            has_dependabot: false,
+        let hygiene = if !tree.tree.is_empty() {
+            detect_hygiene_from_paths(tree.tree.iter().map(|i| i.path.as_str()))
+        } else {
+            let community = self
+                .github
+                .fetch_repository_community_profile(owner, repo)
+                .await
+                .unwrap_or_default();
+            let files = community.files.unwrap_or_default();
+            RepoHygiene {
+                has_readme: files.readme.is_some(),
+                has_license: files.license.is_some(),
+                has_security_policy: files.security.is_some(),
+                has_contributing: files.contributing.is_some(),
+                has_codeowners: false,
+                has_actions_ci: false,
+                has_dependabot: false,
+            }
         };
 
         // Commits
@@ -925,58 +1178,166 @@ impl AnalysisEngine {
 
         // Identity deduplication from commits
         let mut identities_map: HashMap<String, IdentityRecord> = HashMap::new();
+        let repo_full_name = format!("{owner}/{repo}");
+
         for item in &commits {
-            let author = &item.commit.author;
-            let committer = &item.commit.committer;
+            let author = item.commit.author.as_ref();
+            let committer = item.commit.committer.as_ref();
 
-            for actor in [author.as_ref(), committer.as_ref()].into_iter().flatten() {
-                let email_norm = actor.email.trim().to_lowercase();
-                if email_norm.is_empty() {
-                    continue;
-                }
+            let is_verified = item
+                .commit
+                .verification
+                .as_ref()
+                .is_some_and(|v| v.verified);
 
-                let is_verified = item
-                    .commit
-                    .verification
-                    .as_ref()
-                    .is_some_and(|v| v.verified);
+            let author_email = author.map(|a| a.email.trim()).filter(|e| !e.is_empty());
+            let committer_email = committer.map(|c| c.email.trim()).filter(|e| !e.is_empty());
 
-                let entry =
-                    identities_map
-                        .entry(email_norm.clone())
+            match (author_email, committer_email) {
+                (Some(a_email), Some(c_email)) if a_email.eq_ignore_ascii_case(c_email) => {
+                    let a_actor = author.unwrap();
+                    let norm = a_email.to_lowercase();
+                    let entry = identities_map
+                        .entry(norm)
                         .or_insert_with(|| IdentityRecord {
-                            name: Some(actor.name.clone()),
-                            email: actor.email.trim().to_string(),
-                            email_type: classify_email(&actor.email, None),
-                            first_seen: actor.date,
-                            last_seen: actor.date,
+                            name: Some(a_actor.name.clone()),
+                            email: a_actor.email.trim().to_string(),
+                            email_type: classify_email(&a_actor.email, None),
+                            first_seen: a_actor.date,
+                            last_seen: a_actor.date,
                             commits_observed: 0,
-                            repositories: vec![format!("{owner}/{repo}")],
+                            repositories: vec![repo_full_name.clone()],
                             sources: vec!["Public Git Commit Metadata".to_string()],
                             is_verified_signer: false,
                         });
 
-                entry.commits_observed += 1;
-                if is_verified {
-                    entry.is_verified_signer = true;
-                }
-                if let Some(d) = actor.date {
-                    if entry.first_seen.is_none_or(|existing| d < existing) {
-                        entry.first_seen = Some(d);
+                    entry.commits_observed += 1;
+                    if is_verified {
+                        entry.is_verified_signer = true;
                     }
-                    if entry.last_seen.is_none_or(|existing| d > existing) {
-                        entry.last_seen = Some(d);
+                    if !entry.repositories.contains(&repo_full_name) {
+                        entry.repositories.push(repo_full_name.clone());
                     }
-                }
+                    if let Some(d) = a_actor.date {
+                        if entry.first_seen.is_none_or(|existing| d < existing) {
+                            entry.first_seen = Some(d);
+                        }
+                        if entry.last_seen.is_none_or(|existing| d > existing) {
+                            entry.last_seen = Some(d);
+                        }
+                    }
 
-                report.provenance.push(
-                    Provenance::new("Git Commit Metadata", Classification::Observed)
-                        .with_source_url(&item.html_url)
-                        .with_repository(format!("{owner}/{repo}"))
-                        .with_commit(&item.sha)
-                        .with_notes(format!("Email observed: {}", actor.email)),
-                );
+                    report.provenance.push(
+                        Provenance::new("Git Commit Metadata", Classification::Observed)
+                            .with_source_url(&item.html_url)
+                            .with_repository(&repo_full_name)
+                            .with_commit(&item.sha)
+                            .with_notes(format!(
+                                "Email observed as author & committer: {}",
+                                a_actor.email
+                            )),
+                    );
+                }
+                _ => {
+                    if let Some(a_actor) = author {
+                        let email_norm = a_actor.email.trim().to_lowercase();
+                        if !email_norm.is_empty() {
+                            let entry = identities_map.entry(email_norm).or_insert_with(|| {
+                                IdentityRecord {
+                                    name: Some(a_actor.name.clone()),
+                                    email: a_actor.email.trim().to_string(),
+                                    email_type: classify_email(&a_actor.email, None),
+                                    first_seen: a_actor.date,
+                                    last_seen: a_actor.date,
+                                    commits_observed: 0,
+                                    repositories: vec![repo_full_name.clone()],
+                                    sources: vec!["Public Git Commit Metadata".to_string()],
+                                    is_verified_signer: false,
+                                }
+                            });
+
+                            entry.commits_observed += 1;
+                            if is_verified {
+                                entry.is_verified_signer = true;
+                            }
+                            if !entry.repositories.contains(&repo_full_name) {
+                                entry.repositories.push(repo_full_name.clone());
+                            }
+                            if let Some(d) = a_actor.date {
+                                if entry.first_seen.is_none_or(|existing| d < existing) {
+                                    entry.first_seen = Some(d);
+                                }
+                                if entry.last_seen.is_none_or(|existing| d > existing) {
+                                    entry.last_seen = Some(d);
+                                }
+                            }
+
+                            report.provenance.push(
+                                Provenance::new("Git Commit Metadata", Classification::Observed)
+                                    .with_source_url(&item.html_url)
+                                    .with_repository(&repo_full_name)
+                                    .with_commit(&item.sha)
+                                    .with_notes(format!(
+                                        "Email observed as author: {}",
+                                        a_actor.email
+                                    )),
+                            );
+                        }
+                    }
+
+                    if let Some(c_actor) = committer {
+                        let email_norm = c_actor.email.trim().to_lowercase();
+                        if !email_norm.is_empty() {
+                            let entry = identities_map.entry(email_norm).or_insert_with(|| {
+                                IdentityRecord {
+                                    name: Some(c_actor.name.clone()),
+                                    email: c_actor.email.trim().to_string(),
+                                    email_type: classify_email(&c_actor.email, None),
+                                    first_seen: c_actor.date,
+                                    last_seen: c_actor.date,
+                                    commits_observed: 0,
+                                    repositories: vec![repo_full_name.clone()],
+                                    sources: vec!["Public Git Commit Metadata".to_string()],
+                                    is_verified_signer: false,
+                                }
+                            });
+
+                            entry.commits_observed += 1;
+                            if is_verified {
+                                entry.is_verified_signer = true;
+                            }
+                            if !entry.repositories.contains(&repo_full_name) {
+                                entry.repositories.push(repo_full_name.clone());
+                            }
+                            if let Some(d) = c_actor.date {
+                                if entry.first_seen.is_none_or(|existing| d < existing) {
+                                    entry.first_seen = Some(d);
+                                }
+                                if entry.last_seen.is_none_or(|existing| d > existing) {
+                                    entry.last_seen = Some(d);
+                                }
+                            }
+
+                            report.provenance.push(
+                                Provenance::new("Git Commit Metadata", Classification::Observed)
+                                    .with_source_url(&item.html_url)
+                                    .with_repository(&repo_full_name)
+                                    .with_commit(&item.sha)
+                                    .with_notes(format!(
+                                        "Email observed as committer: {}",
+                                        c_actor.email
+                                    )),
+                            );
+                        }
+                    }
+                }
             }
+        }
+
+        // Sort and deduplicate repositories for all identities
+        for id in identities_map.values_mut() {
+            id.repositories.sort();
+            id.repositories.dedup();
         }
 
         let repo_report = RepoReport {
@@ -994,13 +1355,13 @@ impl AnalysisEngine {
             open_issues: gh_repo.open_issues_count,
             size_kb: gh_repo.size,
             primary_language: gh_repo.language.clone(),
-            languages: languages.clone(),
+            languages: Some(languages.clone()),
             created_at: gh_repo.created_at,
             updated_at: gh_repo.updated_at,
             pushed_at: gh_repo.pushed_at,
             topics: gh_repo.topics.clone().unwrap_or_default(),
             license_spdx: gh_repo.license.as_ref().and_then(|l| l.spdx_id.clone()),
-            hygiene,
+            hygiene: Some(hygiene),
             html_url: gh_repo.html_url.clone(),
         };
 
@@ -1055,6 +1416,8 @@ impl AnalysisEngine {
                 message: Some("GitLeak enrichment is scoped to user targets only".to_string()),
             },
         );
+
+        report.recompute_summary();
 
         Ok(report)
     }

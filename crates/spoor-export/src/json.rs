@@ -19,7 +19,10 @@ mod tests {
             AnalysisMode::Fast,
         );
         let json = export_json(&report).unwrap();
-        assert!(json.contains(r#""schema_version": "1.0""#));
+        assert!(json.contains(&format!(
+            r#""schema_version": "{}""#,
+            spoor_core::SCHEMA_VERSION
+        )));
         assert!(json.contains(r#""author": "Voldigoade""#));
         assert!(json.contains(r#""username": "torvalds""#));
     }

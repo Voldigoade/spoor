@@ -37,12 +37,22 @@ pub struct GitLeakMetadata {
     pub total_commits_processed: Option<u64>,
     #[serde(rename = "emailsFound", default)]
     pub emails_found: Option<u64>,
+    #[serde(rename = "filteredEmails", default)]
+    pub filtered_emails: Option<u64>,
+    #[serde(rename = "filteredOutEmails", default)]
+    pub filtered_out_emails: Vec<String>,
     #[serde(rename = "executionTimeMs", default)]
     pub execution_time_ms: Option<u64>,
     #[serde(rename = "discoveredUsernames", default)]
     pub discovered_usernames: Vec<String>,
     #[serde(rename = "activityHeatmap", skip_serializing_if = "Option::is_none")]
     pub activity_heatmap: Option<GitLeakActivityHeatmap>,
+    #[serde(rename = "userProfile", skip_serializing_if = "Option::is_none")]
+    pub user_profile: Option<serde_json::Value>,
+    #[serde(rename = "gpgKeys", default)]
+    pub gpg_keys: Vec<serde_json::Value>,
+    #[serde(rename = "sshKeys", default)]
+    pub ssh_keys: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

@@ -201,18 +201,29 @@ pub fn render_terminal_report(report: &Report) {
             } else {
                 String::new()
             };
+            let type_badge = if id.email_type.is_platform_system() {
+                dim("[PLATFORM / BOT]")
+            } else {
+                dim(format!("({})", id.email_type.as_str()))
+            };
             println!(
                 "  [{}] {} {}{}",
                 i + 1,
                 bold(&id.email),
-                dim(format!("({})", id.email_type.as_str())),
+                type_badge,
                 verified_badge
             );
+            let repos_info = if !id.repositories.is_empty() {
+                format!(" · Repos: {}", id.repositories.join(", "))
+            } else {
+                String::new()
+            };
             println!(
-                "      Committer: {} · Commits: {} · Sources: {}",
+                "      Committer: {} · Commits: {} · Sources: {}{}",
                 name_str,
                 id.commits_observed,
-                dim(id.sources.join(", "))
+                dim(id.sources.join(", ")),
+                dim(repos_info)
             );
         }
         if report.identities.len() > 10 {

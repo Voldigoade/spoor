@@ -6,7 +6,7 @@ use spoor_core::SpoorError;
 use tracing::debug;
 
 use super::models::{
-    GhCommitItem, GhCommunityProfile, GhEvent, GhGpgKey, GhRepo, GhSshKey, GhUser,
+    GhCommitItem, GhCommunityProfile, GhEvent, GhGpgKey, GhRepo, GhSshKey, GhTreeResponse, GhUser,
 };
 use crate::client::HttpClient;
 
@@ -353,6 +353,38 @@ impl GitHubRestClient {
 
         if !resp.status().is_success() {
             return Ok(GhCommunityProfile::default());
+        }
+
+        let body = HttpClient::read_body_limited(resp).await?;
+        Ok(serde_json::from_str(&body).unwrap_or_default())
+    }
+
+    pub async fn get_repo_tree(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+    ) -> Result<GhTreeResponse, SpoorError> {
+        let url = format!(
+            "{}/repos/{owner}/{repo}/git/trees/{branch}?recursive=1",
+            self.base_url
+        );
+        let headers = self.headers();
+
+        let resp = self
+            .client
+            .send_with_retry(
+                || {
+                    self.client
+                        .request(Method::GET, &url)
+                        .headers(headers.clone())
+                },
+                2,
+            )
+            .await?;
+
+        if !resp.status().is_success() {
+            return Ok(GhTreeResponse::default());
         }
 
         let body = HttpClient::read_body_limited(resp).await?;

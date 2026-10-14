@@ -152,3 +152,19 @@ pub struct GhCommunityProfile {
     pub health_percentage: Option<u32>,
     pub files: Option<GhCommunityFiles>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GhTreeItem {
+    pub path: String,
+    #[serde(rename = "type")]
+    pub item_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct GhTreeResponse {
+    pub sha: Option<String>,
+    #[serde(default)]
+    pub tree: Vec<GhTreeItem>,
+    #[serde(default)]
+    pub truncated: bool,
+}

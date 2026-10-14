@@ -7,7 +7,7 @@ use crate::client::HttpClient;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GitLeakOutcome {
-    Success(GitLeakResponse),
+    Success(Box<GitLeakResponse>),
     RateLimited {
         retry_after: Option<u64>,
         message: String,
@@ -68,7 +68,7 @@ impl GitLeakClient {
                                 });
                             }
                         }
-                        Ok(GitLeakOutcome::Success(parsed))
+                        Ok(GitLeakOutcome::Success(Box::new(parsed)))
                     }
                     Err(e) => {
                         debug!("Failed deserializing GitLeak payload: {e}");

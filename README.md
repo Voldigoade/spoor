@@ -152,7 +152,7 @@ Running `spoor` without subcommands launches the interactive terminal REPL:
 
 ```bash
 $ spoor
-spoor 0.1.0
+spoor 0.1.2
 public GitHub footprint explorer
 by Voldigoade
 Type 'help' for commands, 'exit' to quit.

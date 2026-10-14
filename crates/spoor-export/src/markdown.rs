@@ -136,8 +136,12 @@ pub fn export_markdown(report: &Report) -> Result<String, SpoorError> {
         )
         .unwrap();
     } else {
-        writeln!(out, "| Name | Observed Email | Classification | Commits | Verified Signer | First Seen | Last Seen |").unwrap();
-        writeln!(out, "| :--- | :--- | :--- | :--- | :--- | :--- | :--- |").unwrap();
+        writeln!(out, "| Name | Observed Email | Classification | Commits | Repositories | Verified Signer | First Seen | Last Seen |").unwrap();
+        writeln!(
+            out,
+            "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
+        )
+        .unwrap();
         for id in &report.identities {
             let name_str = id.name.as_deref().unwrap_or("—");
             let verified_str = if id.is_verified_signer { "Yes" } else { "No" };
@@ -149,13 +153,19 @@ pub fn export_markdown(report: &Report) -> Result<String, SpoorError> {
                 .last_seen
                 .map(|d| d.format("%Y-%m-%d").to_string())
                 .unwrap_or_else(|| "—".into());
+            let repos_str = if id.repositories.is_empty() {
+                "—".to_string()
+            } else {
+                id.repositories.join(", ")
+            };
             writeln!(
                 out,
-                "| {} | `{}` | {} | {} | {} | {} | {} |",
+                "| {} | `{}` | {} | {} | {} | {} | {} | {} |",
                 name_str,
                 id.email,
                 id.email_type.as_str(),
                 id.commits_observed,
+                repos_str,
                 verified_str,
                 first_str,
                 last_str

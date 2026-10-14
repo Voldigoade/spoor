@@ -6,14 +6,17 @@ pub enum EmailType {
     /// Email directly exposed on user's public GitHub profile.
     PublicProfile,
 
-    /// Modern privacy noreply email: `<id>+<username>@users.noreply.github.com`.
+    /// Modern user privacy noreply email: `<id>+<username>@users.noreply.github.com`.
     GitHubNoReply,
 
-    /// Legacy privacy noreply email: `<username>@users.noreply.github.com`.
+    /// Legacy user privacy noreply email: `<username>@users.noreply.github.com`.
     LegacyGitHubNoReply,
 
     /// Custom corporate, academic, or personal domain email observed in commit headers.
     DomainEmail,
+
+    /// GitHub platform service, automated bot, or web-flow committer (e.g. `noreply@github.com`, `github-actions[bot]`).
+    GitHubSystem,
 
     /// Malformed or unclassifiable email.
     Unknown,
@@ -26,8 +29,13 @@ impl EmailType {
             EmailType::GitHubNoReply => "GitHub Privacy NoReply",
             EmailType::LegacyGitHubNoReply => "GitHub Legacy NoReply",
             EmailType::DomainEmail => "Domain Email (Commit Metadata)",
+            EmailType::GitHubSystem => "GitHub Platform / System Bot",
             EmailType::Unknown => "Unknown / Unclassified",
         }
+    }
+
+    pub fn is_platform_system(&self) -> bool {
+        matches!(self, EmailType::GitHubSystem)
     }
 }
 
@@ -37,17 +45,31 @@ pub fn classify_email(email: &str, profile_public_email: Option<&str>) -> EmailT
         return EmailType::Unknown;
     }
 
+    // 1. Check for GitHub platform service and automated bot identities
+    if is_github_platform_system(&trimmed) {
+        return EmailType::GitHubSystem;
+    }
+
+    // 2. Profile public email match
     if let Some(pub_email) = profile_public_email {
         if trimmed == pub_email.trim().to_lowercase() {
             return EmailType::PublicProfile;
         }
     }
 
+    // 3. User privacy noreply addresses
     if trimmed.ends_with("@users.noreply.github.com") {
         let local_part = trimmed.split('@').next().unwrap_or("");
         if local_part.contains('+') {
             let mut parts = local_part.splitn(2, '+');
             let id_part = parts.next().unwrap_or("");
+            let name_part = parts.next().unwrap_or("");
+            if name_part.contains("[bot]")
+                || name_part == "github-actions"
+                || name_part == "dependabot"
+            {
+                return EmailType::GitHubSystem;
+            }
             if !id_part.is_empty() && id_part.chars().all(|c| c.is_ascii_digit()) {
                 return EmailType::GitHubNoReply;
             }
@@ -59,6 +81,7 @@ pub fn classify_email(email: &str, profile_public_email: Option<&str>) -> EmailT
         return EmailType::LegacyGitHubNoReply;
     }
 
+    // 4. Standard domain emails
     if let Some((_user, domain)) = trimmed.split_once('@') {
         if domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.') {
             return EmailType::DomainEmail;
@@ -66,6 +89,35 @@ pub fn classify_email(email: &str, profile_public_email: Option<&str>) -> EmailT
     }
 
     EmailType::Unknown
+}
+
+fn is_github_platform_system(email: &str) -> bool {
+    // Exact web-flow committer used by GitHub for UI merges and edits
+    if email == "noreply@github.com" {
+        return true;
+    }
+    // GitHub infrastructure bots
+    if email == "github-actions@github.com"
+        || email == "support@github.com"
+        || email == "action@github.com"
+    {
+        return true;
+    }
+    // Check local part for bot suffix/prefix
+    if let Some((user, domain)) = email.split_once('@') {
+        if domain == "github.com" {
+            return true;
+        }
+        if user.ends_with("[bot]")
+            || user.contains("+github-actions[bot]")
+            || user.contains("+dependabot[bot]")
+            || user.contains("+github-actions")
+            || user.contains("+dependabot")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -103,8 +155,39 @@ mod tests {
     #[test]
     fn classifies_domain_email() {
         assert_eq!(
-            classify_email("torvalds@linux-foundation.org", None),
+            classify_email("developer@company.org", None),
             EmailType::DomainEmail
+        );
+        assert_eq!(
+            classify_email("contact@anonseclab.org", None),
+            EmailType::DomainEmail
+        );
+    }
+
+    #[test]
+    fn classifies_github_platform_and_bot_identities() {
+        // GitHub Web Flow merge committer
+        assert_eq!(
+            classify_email("noreply@github.com", None),
+            EmailType::GitHubSystem
+        );
+        // GitHub Actions service email
+        assert_eq!(
+            classify_email("github-actions@github.com", None),
+            EmailType::GitHubSystem
+        );
+        // GitHub Actions bot noreply
+        assert_eq!(
+            classify_email(
+                "41898282+github-actions[bot]@users.noreply.github.com",
+                None
+            ),
+            EmailType::GitHubSystem
+        );
+        // Dependabot
+        assert_eq!(
+            classify_email("49699333+dependabot[bot]@users.noreply.github.com", None),
+            EmailType::GitHubSystem
         );
     }
 
@@ -112,5 +195,6 @@ mod tests {
     fn classifies_malformed_email() {
         assert_eq!(classify_email("not-an-email", None), EmailType::Unknown);
         assert_eq!(classify_email("", None), EmailType::Unknown);
+        assert_eq!(classify_email("@nodomain", None), EmailType::Unknown);
     }
 }

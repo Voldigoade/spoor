@@ -7,7 +7,9 @@ use std::collections::HashMap;
 use spoor_core::SpoorError;
 
 use self::graphql::GitHubGraphQLClient;
-use self::models::{GhCommitItem, GhCommunityProfile, GhEvent, GhGpgKey, GhRepo, GhSshKey, GhUser};
+use self::models::{
+    GhCommitItem, GhCommunityProfile, GhEvent, GhGpgKey, GhRepo, GhSshKey, GhTreeResponse, GhUser,
+};
 use self::rest::GitHubRestClient;
 use crate::client::HttpClient;
 
@@ -96,5 +98,14 @@ impl GitHubProvider {
         repo: &str,
     ) -> Result<GhCommunityProfile, SpoorError> {
         self.rest.get_repo_community_profile(owner, repo).await
+    }
+
+    pub async fn fetch_repository_tree(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+    ) -> Result<GhTreeResponse, SpoorError> {
+        self.rest.get_repo_tree(owner, repo, branch).await
     }
 }

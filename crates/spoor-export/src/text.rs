@@ -147,6 +147,9 @@ pub fn export_text(report: &Report) -> Result<String, SpoorError> {
             if let Some(last) = id.last_seen {
                 writeln!(out, "    Last Seen:    {}", last.format("%Y-%m-%d")).unwrap();
             }
+            if !id.repositories.is_empty() {
+                writeln!(out, "    Repos:        {}", id.repositories.join(", ")).unwrap();
+            }
             writeln!(out, "    Sources:      {}", id.sources.join(", ")).unwrap();
             writeln!(out).unwrap();
         }

@@ -8,7 +8,7 @@ use crate::email::EmailType;
 use crate::provenance::Provenance;
 use crate::target::{AnalysisMode, Target};
 
-pub const SCHEMA_VERSION: &str = "1.0";
+pub const SCHEMA_VERSION: &str = "1.1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeneratorInfo {
@@ -115,7 +115,8 @@ pub struct RepoReport {
     pub size_kb: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_language: Option<String>,
-    pub languages: HashMap<String, u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub languages: Option<HashMap<String, u64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -125,7 +126,8 @@ pub struct RepoReport {
     pub topics: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub license_spdx: Option<String>,
-    pub hygiene: RepoHygiene,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hygiene: Option<RepoHygiene>,
     pub html_url: String,
 }
 
@@ -301,5 +303,60 @@ impl Report {
                 "Historical activity may be truncated by upstream provider retention policies and request budgets.".to_string(),
             ],
         }
+    }
+
+    /// Recomputes and verifies summary metrics from the canonical report data.
+    pub fn recompute_summary(&mut self) {
+        let total_stars: u64 = self.repositories.iter().map(|r| r.stars).sum();
+        let total_forks: u64 = self.repositories.iter().map(|r| r.forks).sum();
+
+        let total_repos = if let Some(p) = &self.profile {
+            p.public_repos as usize
+        } else {
+            self.repositories.len()
+        };
+
+        let repos_count = self.repositories.len();
+        let fork_count = self.repositories.iter().filter(|r| r.is_fork).count();
+        let archived_count = self.repositories.iter().filter(|r| r.is_archived).count();
+
+        let fork_ratio = if repos_count > 0 {
+            fork_count as f64 / repos_count as f64
+        } else {
+            0.0
+        };
+
+        let archived_ratio = if repos_count > 0 {
+            archived_count as f64 / repos_count as f64
+        } else {
+            0.0
+        };
+
+        // Primary languages across repositories
+        let mut lang_counts: std::collections::BTreeMap<String, u64> =
+            std::collections::BTreeMap::new();
+        for r in &self.repositories {
+            if let Some(lang) = &r.primary_language {
+                *lang_counts.entry(lang.clone()).or_insert(0) += 1;
+            }
+        }
+        let mut sorted_langs: Vec<(String, u64)> = lang_counts.into_iter().collect();
+        sorted_langs.sort_by_key(|b| std::cmp::Reverse(b.1));
+
+        // Distinct human / target emails (excluding automated platform bots)
+        let distinct_emails = self
+            .identities
+            .iter()
+            .filter(|id| id.email_type != EmailType::GitHubSystem)
+            .count();
+
+        self.summary.total_public_repositories = total_repos;
+        self.summary.total_stars_accumulated = total_stars;
+        self.summary.total_forks_accumulated = total_forks;
+        self.summary.primary_languages = sorted_langs;
+        self.summary.distinct_emails_observed = distinct_emails;
+        self.summary.public_keys_found = self.keys.len();
+        self.summary.fork_ratio = fork_ratio;
+        self.summary.archived_ratio = archived_ratio;
     }
 }
