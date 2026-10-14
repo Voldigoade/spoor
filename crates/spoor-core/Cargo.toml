@@ -1,0 +1,22 @@
+[package]
+name = "spoor-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Core domain types, target parsing, report schemas, provenance, and caching for Spoor"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+url = { workspace = true }
+rusqlite = { workspace = true }
+async-trait = { workspace = true }
+regex = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

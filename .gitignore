@@ -1,0 +1,28 @@
+# Rust build output
+/target/
+**/*.rs.bk
+
+# SQLite databases & temp files
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+/data/
+/cache/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# IDE and Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Generated export test files
+*.export.tmp
