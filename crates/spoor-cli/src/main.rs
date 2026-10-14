@@ -136,7 +136,11 @@ async fn main() {
                 }
             },
         },
-        Some(Commands::Serve { bind, port }) => {
+        Some(Commands::Serve {
+            bind,
+            port,
+            trusted_proxies,
+        }) => {
             let addr_str = format!("{bind}:{port}");
             let addr: SocketAddr = match addr_str.parse() {
                 Ok(a) => a,
@@ -148,7 +152,23 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
-            let state = spoor_server::AppState::new(engine);
+
+            let proxy_config = if let Some(raw) = trusted_proxies {
+                match spoor_server::TrustedProxyConfig::parse(&raw) {
+                    Ok(cfg) => cfg,
+                    Err(e) => {
+                        eprintln!("{}: {}", red("[error]"), e);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                std::env::var("SPOOR_TRUSTED_PROXIES")
+                    .ok()
+                    .and_then(|raw| spoor_server::TrustedProxyConfig::parse(&raw).ok())
+                    .unwrap_or_default()
+            };
+
+            let state = spoor_server::AppState::with_proxy_config(engine, proxy_config);
             println!(
                 "{}",
                 bold(format!("Starting Spoor HTTP service on http://{addr}"))
@@ -156,6 +176,11 @@ async fn main() {
             println!("  * Health check:    http://{addr}/healthz");
             println!("  * Lookups API:     http://{addr}/v1/lookups");
             println!("  * Progress stream: http://{addr}/v1/lookups/:id/events");
+            if state.proxy_config.is_enabled() {
+                println!("  * Trusted Proxies: Configured (forwarding headers honored for verified proxies)");
+            } else {
+                println!("  * Trusted Proxies: Disabled (direct peer socket IP used exclusively)");
+            }
             println!("Press Ctrl+C to terminate gracefully.\n");
 
             if let Err(e) = spoor_server::run_server(addr, state).await {

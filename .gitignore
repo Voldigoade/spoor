@@ -26,3 +26,6 @@ Thumbs.db
 
 # Generated export test files
 *.export.tmp
+
+# Node / npm
+node_modules/

@@ -266,3 +266,33 @@ async function loadReport(id: string) {
   terminal.writeln(`Discovered ${report.identities.length} public identities.`);
 }
 ```
+
+---
+
+## 7. Operational Topology & Production Hardening
+
+### 7.1 Single-Instance State Constraint
+
+Spoor v0.1 server maintains active lookup states, SSE broadcast channels, and ephemeral IP rate limits in process-local memory.
+
+> [!IMPORTANT]
+> **Operational Requirement:** Spoor v0.1 server must run as a single application replica (`replicas: 1`) unless a shared lookup/job state implementation is introduced. Deploying multiple server replicas behind a round-robin load balancer without sticky routing will cause disconnected SSE event streams and fragmented rate-limiting state.
+
+### 7.2 Reverse Proxy & Client IP Verification
+
+Direct clients connecting over public networks can trivially inject or manipulate `X-Forwarded-For` headers. To prevent IP rate-limiting bypass:
+
+* **Default Mode (Untrusted):** When `SPOOR_TRUSTED_PROXIES` is unset, Spoor uses the direct socket peer IP exclusively. All incoming `X-Forwarded-For` headers are strictly ignored.
+* **Trusted Reverse Proxy Mode:** When Spoor is deployed behind reverse proxies or CDNs (such as Nginx, Caddy, or Cloudflare), configure trusted proxy IPs or CIDR subnets via `SPOOR_TRUSTED_PROXIES` (e.g. `127.0.0.1, 10.0.0.0/8, 172.16.0.0/12`):
+  * Spoor first verifies that the direct socket connection originates from a configured trusted proxy.
+  * If trusted, Spoor inspects `X-Forwarded-For` from right to left (nearest proxy backwards), skipping intermediary trusted proxies and selecting the first untrusted upstream IP.
+  * Any client-injected spoofed headers situated upstream of the trusted proxy are ignored.
+
+### 7.3 Production CORS Configuration
+
+Cross-Origin Resource Sharing (CORS) is strictly restricted in production:
+
+* Set `SPOOR_ALLOWED_ORIGINS` to a comma-separated list of exact production origins (e.g. `https://voldigoade-portfolio.vercel.app`).
+* Wildcard origins (`*`) are disallowed in production deployments.
+* If `SPOOR_ALLOWED_ORIGINS` is unset, the server defaults to permitting only local development origins (`http://localhost`, `http://127.0.0.1`).
+

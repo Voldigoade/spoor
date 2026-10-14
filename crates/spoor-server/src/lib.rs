@@ -1,10 +1,12 @@
 pub mod limiter;
+pub mod proxy;
 pub mod routes;
 pub mod state;
 
 use std::net::SocketAddr;
 
 use axum::extract::DefaultBodyLimit;
+use axum::http::{header, Method};
 use axum::routing::{get, post};
 use axum::Router;
 use spoor_core::SpoorError;
@@ -13,6 +15,7 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 
 pub use limiter::EphemeralIpRateLimiter;
+pub use proxy::TrustedProxyConfig;
 pub use routes::*;
 pub use state::{AppState, LookupEntry, LookupStatus};
 
@@ -21,12 +24,14 @@ pub fn create_router(state: AppState) -> Router {
     let cors = if let Ok(origins) = std::env::var("SPOOR_ALLOWED_ORIGINS") {
         let parsed_origins: Vec<_> = origins
             .split(',')
-            .filter_map(|s| s.trim().parse().ok())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| s.parse().ok())
             .collect();
         CorsLayer::new()
             .allow_origin(AllowOrigin::list(parsed_origins))
-            .allow_methods(tower_http::cors::Any)
-            .allow_headers(tower_http::cors::Any)
+            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+            .allow_headers([header::CONTENT_TYPE, header::ACCEPT, header::AUTHORIZATION])
     } else {
         // Development default: allow localhost and common development ports
         CorsLayer::new()
@@ -34,8 +39,8 @@ pub fn create_router(state: AppState) -> Router {
                 let s = origin.to_str().unwrap_or("");
                 s.starts_with("http://localhost") || s.starts_with("http://127.0.0.1")
             }))
-            .allow_methods(tower_http::cors::Any)
-            .allow_headers(tower_http::cors::Any)
+            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+            .allow_headers([header::CONTENT_TYPE, header::ACCEPT, header::AUTHORIZATION])
     };
 
     Router::new()

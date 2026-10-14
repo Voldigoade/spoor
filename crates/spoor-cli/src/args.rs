@@ -100,6 +100,11 @@ pub enum Commands {
         /// Listen port
         #[arg(long, short = 'p', default_value = "8080")]
         port: u16,
+
+        /// Comma-separated list of trusted proxy IPs or CIDRs (e.g. 127.0.0.1,10.0.0.0/8).
+        /// If omitted, defaults to SPOOR_TRUSTED_PROXIES environment variable, or empty (untrusted).
+        #[arg(long, env = "SPOOR_TRUSTED_PROXIES")]
+        trusted_proxies: Option<String>,
     },
 }
 

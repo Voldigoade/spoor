@@ -1446,7 +1446,7 @@ dependencies = [
 
 [[package]]
 name = "spoor-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "clap",
@@ -1463,7 +1463,7 @@ dependencies = [
 
 [[package]]
 name = "spoor-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1479,7 +1479,7 @@ dependencies = [
 
 [[package]]
 name = "spoor-export"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "flate2",
@@ -1491,7 +1491,7 @@ dependencies = [
 
 [[package]]
 name = "spoor-providers"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1509,10 +1509,11 @@ dependencies = [
 
 [[package]]
 name = "spoor-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "chrono",
+ "ipnet",
  "reqwest",
  "serde",
  "serde_json",

@@ -63,17 +63,12 @@ pub async fn create_lookup_handler(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(payload): Json<CreateLookupRequest>,
 ) -> Result<(StatusCode, Json<LookupMetaResponse>), (StatusCode, Json<ApiErrorResponse>)> {
-    // 1. IP rate limiting (extract IP from X-Forwarded-For or socket addr)
-    let client_ip = headers
-        .get("x-forwarded-for")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| addr.ip().to_string());
+    // 1. IP rate limiting (extract IP using trusted proxy resolver)
+    let client_ip = state.proxy_config.resolve_client_ip(addr.ip(), &headers);
 
     let allowed = {
         let mut limiter = state.limiter.lock().await;
-        limiter.check_and_record(&client_ip)
+        limiter.check_and_record(&client_ip.to_string())
     };
 
     if !allowed {

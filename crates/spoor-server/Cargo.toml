@@ -21,6 +21,7 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 tokio-stream = { workspace = true }
+ipnet = { workspace = true }
 
 [dev-dependencies]
 reqwest = { workspace = true }

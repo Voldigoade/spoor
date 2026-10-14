@@ -14,7 +14,7 @@ Spoor is built on the philosophy of empirical correctness, explicit provenance, 
 
 ## 2. GitHub API Retention & Windowing
 
-* **Public Events:** GitHub's public event stream (`/users/{username}/events/public`) only retains activity generated within the past 90 days, capped at a maximum of 300 events across 3 pages. Reports explicitly note this window and never claim to represent complete lifetime activity history.
+* **Public Events:** GitHub's public event stream (`/users/{username}/events/public`) only retains activity generated within the previous 30 days, capped at a maximum of 300 events across 3 pages. Reports explicitly note this window and never claim to represent complete lifetime activity history.
 * **Commit Budgets:** Full commit history for multi-thousand-commit repositories is neither practical nor polite to scan over public APIs in interactive workflows. Spoor bounds commit inspection by default:
   * **FAST mode:** inspects up to 3 most recently pushed repositories, sampling up to 30 commits per repository.
   * **DEEP mode:** inspects up to 8 repositories, sampling up to 50 commits per repository.

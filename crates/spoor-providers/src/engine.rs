@@ -429,7 +429,7 @@ impl AnalysisEngine {
             .await
             .unwrap_or_default();
         let mut activity_report = ActivityReport {
-            window_note: "Public event retention window is limited to the most recent 90 days / 300 events by GitHub API.".to_string(),
+            window_note: "Public event retention window is limited to events from the previous 30 days and up to 300 events by GitHub API.".to_string(),
             total_events_observed: events.len(),
             ..Default::default()
         };

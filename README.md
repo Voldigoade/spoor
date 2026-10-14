@@ -180,6 +180,12 @@ spoor serve --bind 127.0.0.1 --port 8080
 * Fetch report: `GET /v1/lookups/{id}/report`
 * Download export: `GET /v1/lookups/{id}/export/{format}`
 
+### Operational Architecture & Production Hardening
+
+* **Single-Instance Replica:** Spoor v0.1 server maintains active lookups, SSE broadcasters, and IP rate-limiting in process-local memory. It must run as a single application replica (`replicas: 1`).
+* **Trusted Reverse Proxies:** By default, Spoor exclusively uses direct socket peer IPs for rate limiting and strictly ignores client-supplied `X-Forwarded-For` headers. When deployed behind reverse proxies, configure `--trusted-proxies` or `SPOOR_TRUSTED_PROXIES` (e.g. `127.0.0.1, 10.0.0.0/8`). Spoor validates the proxy peer and performs a secure right-to-left traversal to extract authentic client IPs.
+* **Production CORS:** Set `SPOOR_ALLOWED_ORIGINS` to a comma-separated list of exact production origins (e.g. `https://voldigoade-portfolio.vercel.app`). Wildcards are rejected in production.
+
 For full API specifications, SSE event schemas, and reference client integration, see [`docs/EMBED.md`](docs/EMBED.md).
 
 ---

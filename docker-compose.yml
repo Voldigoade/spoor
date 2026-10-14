@@ -1,3 +1,16 @@
+# ==============================================================================
+# Spoor Docker Compose Configuration
+#
+# OPERATIONAL TOPOLOGY REQUIREMENT:
+# Spoor v0.1 server maintains active lookup states, SSE broadcast channels, and
+# ephemeral IP rate limits in process-local memory.
+#
+# Spoor v0.1 server must run as a single application replica (replicas: 1)
+# unless a shared lookup/job state implementation is introduced. Horizontal
+# scaling across multiple replicas without sticky routing will cause fragmented
+# SSE progress delivery and disjoint rate-limiting.
+# ==============================================================================
+
 services:
   spoor:
     build:
@@ -9,9 +22,18 @@ services:
       - SPOOR_BIND=0.0.0.0
       - SPOOR_PORT=8080
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      # Trusted reverse proxy IPs/CIDRs (e.g. 10.0.0.0/8, 172.16.0.0/12, or Cloudflare ranges).
+      # If omitted or empty, Spoor operates in default direct-connect mode: socket peer IP
+      # is used exclusively and X-Forwarded-For is strictly ignored to prevent spoofing.
+      - SPOOR_TRUSTED_PROXIES=${SPOOR_TRUSTED_PROXIES:-}
+      # Production CORS allowed origins (comma-separated exact origins, e.g. https://voldigoade-portfolio.vercel.app).
+      # If omitted, defaults to local development origins (http://localhost, http://127.0.0.1).
+      - SPOOR_ALLOWED_ORIGINS=${SPOOR_ALLOWED_ORIGINS:-}
     volumes:
       - spoor-cache:/var/lib/spoor
     restart: unless-stopped
+    deploy:
+      replicas: 1
 
 volumes:
   spoor-cache:
