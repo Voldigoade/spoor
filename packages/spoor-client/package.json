@@ -1,0 +1,13 @@
+{
+  "name": "@spoor/client",
+  "version": "0.1.0",
+  "description": "Zero-dependency TypeScript client for Spoor public GitHub footprint inspection API",
+  "author": "Voldigoade",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc"
+  },
+  "keywords": ["spoor", "github", "footprint", "osint", "terminal"],
+  "license": "UNLICENSED"
+}

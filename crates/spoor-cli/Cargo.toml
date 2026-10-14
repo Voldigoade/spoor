@@ -1,0 +1,24 @@
+[package]
+name = "spoor-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Terminal-first CLI and interactive shell for Spoor"
+
+[[bin]]
+name = "spoor"
+path = "src/main.rs"
+
+[dependencies]
+spoor-core = { workspace = true }
+spoor-providers = { workspace = true }
+spoor-export = { workspace = true }
+spoor-server = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }

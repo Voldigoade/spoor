@@ -1,0 +1,8 @@
+/target/
+.git/
+*.sqlite
+*.db
+.env
+.env.*
+node_modules/
+exports/
