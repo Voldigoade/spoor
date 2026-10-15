@@ -965,9 +965,18 @@ async fn test_global_commit_search_role_tagging() {
     assert_eq!(disc.global_author_commits_found, 2);
     assert_eq!(disc.global_committer_commits_found, 2);
 
-    assert!(report.identities.iter().any(|id| id.email == "eve@author.org"));
-    assert!(report.identities.iter().any(|id| id.email == "eve@both.org"));
-    assert!(report.identities.iter().any(|id| id.email == "eve@committer.org"));
+    assert!(report
+        .identities
+        .iter()
+        .any(|id| id.email == "eve@author.org"));
+    assert!(report
+        .identities
+        .iter()
+        .any(|id| id.email == "eve@both.org"));
+    assert!(report
+        .identities
+        .iter()
+        .any(|id| id.email == "eve@committer.org"));
 }
 
 #[tokio::test]

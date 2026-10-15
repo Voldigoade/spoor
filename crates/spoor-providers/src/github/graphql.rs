@@ -270,7 +270,10 @@ impl GitHubGraphQLClient {
             }
         };
 
-        let years_discovered = user_node.contributions_collection.contribution_years.clone();
+        let years_discovered = user_node
+            .contributions_collection
+            .contribution_years
+            .clone();
         let mut years_queried = Vec::new();
         let mut map: std::collections::HashMap<String, HistoricalContributionRepo> =
             std::collections::HashMap::new();

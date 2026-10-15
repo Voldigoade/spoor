@@ -680,7 +680,8 @@ pub fn export_pdf(report: &Report) -> Result<Vec<u8>, SpoorError> {
     pdf.add_object(pages_dict.into_bytes());
 
     pdf.add_object(
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_vec(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
+            .to_vec(),
     );
     pdf.add_object(
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>"

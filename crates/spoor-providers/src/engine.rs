@@ -5,10 +5,9 @@ use std::time::Instant;
 use chrono::{NaiveDate, Utc};
 use spoor_core::{
     classify_email, ActivityEventSummary, ActivityReport, AnalysisMode, AnalysisOptions,
-    CacheStore, Classification, CommitMatchRole, CoverageRecord, DiscoveryCoverage,
-    IdentityRecord, InferenceRecord, KeyRecord, KeyType, ProfileReport, Provenance,
-    ProviderHealth, ProviderStatus, RepoHygiene, RepoReport, Report, ReportSummary,
-    SpoorError, SpoorEvent, Target,
+    CacheStore, Classification, CommitMatchRole, CoverageRecord, DiscoveryCoverage, IdentityRecord,
+    InferenceRecord, KeyRecord, KeyType, ProfileReport, Provenance, ProviderHealth, ProviderStatus,
+    RepoHygiene, RepoReport, Report, ReportSummary, SpoorError, SpoorEvent, Target,
 };
 use tokio::sync::mpsc::Sender;
 
@@ -228,7 +227,11 @@ impl AnalysisEngine {
             if requests_used < max_requests {
                 requests_used += 1;
                 let query = format!("author:{username}");
-                match self.github.search_commits(&query, 1, 100, Some("author-date")).await {
+                match self
+                    .github
+                    .search_commits(&query, 1, 100, Some("author-date"))
+                    .await
+                {
                     Ok(res) => {
                         let count = res.items.len();
                         author_commits_count += count;
@@ -279,7 +282,11 @@ impl AnalysisEngine {
                 };
 
                 requests_used += 1;
-                match self.github.search_commits(&query, 1, 100, Some("author-date")).await {
+                match self
+                    .github
+                    .search_commits(&query, 1, 100, Some("author-date"))
+                    .await
+                {
                     Ok(res) => {
                         author_commits_count += res.items.len();
                         for item in res.items {
@@ -308,7 +315,11 @@ impl AnalysisEngine {
                                     break;
                                 }
                                 requests_used += 1;
-                                match self.github.search_commits(&query, p, 100, Some("author-date")).await {
+                                match self
+                                    .github
+                                    .search_commits(&query, p, 100, Some("author-date"))
+                                    .await
+                                {
                                     Ok(page_res) => {
                                         author_commits_count += page_res.items.len();
                                         for item in page_res.items {
@@ -367,7 +378,11 @@ impl AnalysisEngine {
         if mode == AnalysisMode::Fast {
             if requests_used < max_requests {
                 let query = format!("committer:{username}");
-                match self.github.search_commits(&query, 1, 100, Some("committer-date")).await {
+                match self
+                    .github
+                    .search_commits(&query, 1, 100, Some("committer-date"))
+                    .await
+                {
                     Ok(res) => {
                         let count = res.items.len();
                         committer_commits_count += count;
@@ -420,7 +435,11 @@ impl AnalysisEngine {
                 };
 
                 requests_used += 1;
-                match self.github.search_commits(&query, 1, 100, Some("committer-date")).await {
+                match self
+                    .github
+                    .search_commits(&query, 1, 100, Some("committer-date"))
+                    .await
+                {
                     Ok(res) => {
                         committer_commits_count += res.items.len();
                         for item in res.items {
@@ -451,7 +470,11 @@ impl AnalysisEngine {
                                     break;
                                 }
                                 requests_used += 1;
-                                match self.github.search_commits(&query, p, 100, Some("committer-date")).await {
+                                match self
+                                    .github
+                                    .search_commits(&query, p, 100, Some("committer-date"))
+                                    .await
+                                {
                                     Ok(page_res) => {
                                         committer_commits_count += page_res.items.len();
                                         for item in page_res.items {
@@ -466,8 +489,13 @@ impl AnalysisEngine {
                                                 committer: item.committer,
                                             };
                                             map.entry(key)
-                                                .and_modify(|existing| existing.1 = CommitMatchRole::Both)
-                                                .or_insert((commit_item, CommitMatchRole::Committer));
+                                                .and_modify(|existing| {
+                                                    existing.1 = CommitMatchRole::Both
+                                                })
+                                                .or_insert((
+                                                    commit_item,
+                                                    CommitMatchRole::Committer,
+                                                ));
                                         }
                                     }
                                     Err(e) => {
@@ -516,12 +544,17 @@ impl AnalysisEngine {
                 (ProviderHealth::Partial, Some(msg))
             } else {
                 match err {
-                    SpoorError::RateLimitExceeded { .. } => (ProviderHealth::RateLimited, Some(msg)),
+                    SpoorError::RateLimitExceeded { .. } => {
+                        (ProviderHealth::RateLimited, Some(msg))
+                    }
                     _ => (ProviderHealth::Unavailable, Some(msg)),
                 }
             }
         } else if stopped_due_to_budget || windows_partial > 0 {
-            (ProviderHealth::Partial, Some("Search completed partially within request budget".to_string()))
+            (
+                ProviderHealth::Partial,
+                Some("Search completed partially within request budget".to_string()),
+            )
         } else {
             (ProviderHealth::Ok, None)
         };
@@ -771,10 +804,15 @@ impl AnalysisEngine {
                 entry.sources.push("Commit Search".to_string());
             }
 
-            raw_commits.push((disc.repo_full_name.clone(), disc.item.clone(), Some(disc.role)));
+            raw_commits.push((
+                disc.repo_full_name.clone(),
+                disc.item.clone(),
+                Some(disc.role),
+            ));
         }
 
-        let total_search_commits = search_outcome.author_commits_count + search_outcome.committer_commits_count;
+        let total_search_commits =
+            search_outcome.author_commits_count + search_outcome.committer_commits_count;
         report.provider_status.insert(
             "GitHub Commit Search".to_string(),
             ProviderStatus {
@@ -805,7 +843,11 @@ impl AnalysisEngine {
             .await;
 
             if options.mode == AnalysisMode::Deep {
-                match self.github.fetch_user_contributions_historical(username, 5).await {
+                match self
+                    .github
+                    .fetch_user_contributions_historical(username, 5)
+                    .await
+                {
                     Ok(hist) => {
                         graphql_years_fully_traversed = hist.fully_traversed;
                         report.provider_status.insert(
@@ -826,7 +868,12 @@ impl AnalysisEngine {
                         for c in hist.contributions {
                             if !c.repository.is_private {
                                 let repo_full_name = c.repository.name_with_owner.clone();
-                                let years_str = c.years.iter().map(|y| y.to_string()).collect::<Vec<_>>().join(", ");
+                                let years_str = c
+                                    .years
+                                    .iter()
+                                    .map(|y| y.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
                                 let src_label = format!("Contribution ({years_str})");
 
                                 let entry = candidate_map
@@ -1053,10 +1100,11 @@ impl AnalysisEngine {
             std::cmp::Reverse(score)
         });
 
-        let (max_total_candidates, reserved_external, reserved_owned, commit_per_repo_limit) = match options.mode {
-            AnalysisMode::Fast => (8, 4, 4, 50),
-            AnalysisMode::Deep => (25, 12, 13, 500),
-        };
+        let (max_total_candidates, reserved_external, reserved_owned, commit_per_repo_limit) =
+            match options.mode {
+                AnalysisMode::Fast => (8, 4, 4, 50),
+                AnalysisMode::Deep => (25, 12, 13, 500),
+            };
 
         let mut eligible_candidates = Vec::new();
         let mut ext_iter = external_candidates.into_iter();
@@ -1127,9 +1175,10 @@ impl AnalysisEngine {
                 }
                 Err(e) => {
                     repository_scans_failed += 1;
-                    report
-                        .warnings
-                        .push(format!("Failed to retrieve commits for {}: {e}", r.full_name));
+                    report.warnings.push(format!(
+                        "Failed to retrieve commits for {}: {e}",
+                        r.full_name
+                    ));
                 }
             }
 
@@ -1141,9 +1190,10 @@ impl AnalysisEngine {
                 Ok(l) => Some(l),
                 Err(e) => {
                     if !matches!(&e, SpoorError::RepoNotFound(_)) {
-                        report
-                            .warnings
-                            .push(format!("Failed to retrieve languages for {}: {e}", r.full_name));
+                        report.warnings.push(format!(
+                            "Failed to retrieve languages for {}: {e}",
+                            r.full_name
+                        ));
                     }
                     None
                 }
@@ -1248,30 +1298,42 @@ impl AnalysisEngine {
                         Err(SpoorError::Timeout { .. }) => {
                             git_timed_out += 1;
                             git_failed += 1;
-                            report
-                                .warnings
-                                .push(format!("Git bare clone timed out for {}", candidate.full_name));
+                            report.warnings.push(format!(
+                                "Git bare clone timed out for {}",
+                                candidate.full_name
+                            ));
                         }
                         Err(e) => {
                             git_failed += 1;
-                            report
-                                .warnings
-                                .push(format!("Git bare clone failed for {}: {e}", candidate.full_name));
+                            report.warnings.push(format!(
+                                "Git bare clone failed for {}: {e}",
+                                candidate.full_name
+                            ));
                         }
                     }
                 }
 
                 git_inspected = git_succeeded > 0;
                 let (status, msg) = if git_attempted == 0 {
-                    (ProviderHealth::Skipped, "No candidate repositories matched git history inspection criteria".to_string())
+                    (
+                        ProviderHealth::Skipped,
+                        "No candidate repositories matched git history inspection criteria"
+                            .to_string(),
+                    )
                 } else if git_succeeded == git_attempted {
                     (ProviderHealth::Ok, format!("Inspected all {git_succeeded} candidate repositories via bare git clone"))
                 } else if git_succeeded > 0 {
                     (ProviderHealth::Partial, format!("{git_succeeded} of {git_attempted} candidate repositories inspected ({git_failed} failed)"))
                 } else if git_timed_out > 0 {
-                    (ProviderHealth::Unavailable, format!("All {git_attempted} candidate git clone operations timed out"))
+                    (
+                        ProviderHealth::Unavailable,
+                        format!("All {git_attempted} candidate git clone operations timed out"),
+                    )
                 } else {
-                    (ProviderHealth::Unavailable, format!("All {git_attempted} candidate git clone operations failed"))
+                    (
+                        ProviderHealth::Unavailable,
+                        format!("All {git_attempted} candidate git clone operations failed"),
+                    )
                 };
 
                 report.provider_status.insert(
@@ -1366,7 +1428,10 @@ impl AnalysisEngine {
         }
 
         for r in &eligible_candidates {
-            if !gh_repos.iter().any(|gr| gr.full_name.eq_ignore_ascii_case(&r.full_name)) {
+            if !gh_repos
+                .iter()
+                .any(|gr| gr.full_name.eq_ignore_ascii_case(&r.full_name))
+            {
                 let (langs, hyg) = match scanned_repo_meta.remove(&r.full_name) {
                     Some((l, h)) => (l, h),
                     None => (None, None),

@@ -235,7 +235,9 @@ mod tests {
     #[test]
     fn test_inspect_help_output_contains_expected_flags_and_enums() {
         let mut cmd = Cli::command();
-        let inspect_cmd = cmd.find_subcommand_mut("inspect").expect("inspect subcommand");
+        let inspect_cmd = cmd
+            .find_subcommand_mut("inspect")
+            .expect("inspect subcommand");
         let help = inspect_cmd.render_help().to_string();
         assert!(help.contains("-m, --mode <MODE>"));
         assert!(help.contains("[possible values: fast, deep]"));
@@ -248,7 +250,9 @@ mod tests {
     #[test]
     fn test_export_help_output_contains_expected_flags_and_enums() {
         let mut cmd = Cli::command();
-        let export_cmd = cmd.find_subcommand_mut("export").expect("export subcommand");
+        let export_cmd = cmd
+            .find_subcommand_mut("export")
+            .expect("export subcommand");
         let help = export_cmd.render_help().to_string();
         assert!(help.contains("-f, --format <FORMAT>"));
         assert!(help.contains("[possible values: text, json, markdown, pdf, svg]"));
@@ -263,7 +267,8 @@ mod tests {
         assert!(cli.enrich);
         assert!(!cli.deep);
 
-        let cli2 = Cli::try_parse_from(["spoor", "torvalds", "-d"]).expect("parse valid short deep");
+        let cli2 =
+            Cli::try_parse_from(["spoor", "torvalds", "-d"]).expect("parse valid short deep");
         assert!(cli2.deep);
         assert!(!cli2.enrich);
     }

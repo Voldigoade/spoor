@@ -16,8 +16,7 @@ pub use provenance::Provenance;
 pub use report::{
     ActivityEventSummary, ActivityReport, CommitMatchRole, CoverageRecord, DiscoveryCoverage,
     GeneratorInfo, IdentityRecord, InferenceRecord, KeyRecord, KeyType, ProfileReport,
-    ProviderHealth, ProviderStatus, RepoHygiene, RepoReport, Report, ReportSummary,
-    SCHEMA_VERSION,
+    ProviderHealth, ProviderStatus, RepoHygiene, RepoReport, Report, ReportSummary, SCHEMA_VERSION,
 };
 pub use target::{AnalysisMode, AnalysisOptions, Target};
 
