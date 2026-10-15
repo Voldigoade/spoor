@@ -68,6 +68,21 @@ async fn zero_limit_returns_without_events() {
 }
 
 #[tokio::test]
+async fn empty_first_page_returns_complete_empty_batch() {
+    let server = MockServer::start().await;
+    mount_page(&server, 1, 100, 0, false, 200).await;
+
+    let result = provider(&server)
+        .fetch_user_events("alice", 300)
+        .await
+        .unwrap();
+
+    assert!(result.events.is_empty());
+    assert!(result.is_complete);
+    assert!(result.warning.is_none());
+}
+
+#[tokio::test]
 async fn short_page_returns_all_available_events() {
     let server = MockServer::start().await;
     mount_page(&server, 1, 50, 20, false, 200).await;
