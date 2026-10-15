@@ -20,7 +20,6 @@ pub use routes::*;
 pub use state::{AppState, LookupEntry, LookupStatus, ServerOptions};
 
 pub fn create_router(state: AppState) -> Router {
-    // Configurable CORS: read SPOOR_ALLOWED_ORIGINS or default to development origins
     let cors = if let Ok(origins) = std::env::var("SPOOR_ALLOWED_ORIGINS") {
         let parsed_origins: Vec<_> = origins
             .split(',')
@@ -33,7 +32,6 @@ pub fn create_router(state: AppState) -> Router {
             .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
             .allow_headers([header::CONTENT_TYPE, header::ACCEPT, header::AUTHORIZATION])
     } else {
-        // Development default: allow localhost and common development ports
         CorsLayer::new()
             .allow_origin(AllowOrigin::predicate(|origin, _| {
                 let s = origin.to_str().unwrap_or("");
@@ -60,7 +58,6 @@ pub fn create_router(state: AppState) -> Router {
 }
 
 pub async fn run_server(addr: SocketAddr, state: AppState) -> Result<(), SpoorError> {
-    // Background lookup retention cleanup
     let retention_state = state.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));

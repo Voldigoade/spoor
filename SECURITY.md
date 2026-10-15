@@ -1,22 +1,13 @@
-# Security Policy
+# Security
 
-## Reporting Security Vulnerabilities
+Report vulnerabilities through [GitHub private vulnerability reporting](https://github.com/Voldigoade/spoor/security/advisories/new). Include the affected version, reproduction steps and impact. Keep undisclosed vulnerabilities out of public issues.
 
-Spoor is a public footprint research tool and security auditing instrument designed for responsible public metadata inspection.
+## Boundaries
 
-If you believe you have found a security vulnerability in Spoor—such as a potential Server-Side Request Forgery (SSRF) bypass, denial of service vector, or credential handling issue—please report it responsibly through GitHub Private Vulnerability Reporting:
+Targets are parsed before provider requests. Only github.com and www.github.com targets are accepted; other hosts, URL credentials, nonstandard ports and ambiguous paths are rejected. Provider clients use configured upstream endpoints. Spoor never executes code or package managers from inspected repositories.
 
-1. Navigate to the repository at `https://github.com/Voldigoade/spoor`.
-2. Click on the **Security** tab.
-3. Select **Report a vulnerability** to open an advisory draft.
+Provider credentials stay on the server and are not included in reports or exports. Avoid logging request credentials when adding diagnostics.
 
-Do not file public GitHub issues for undisclosed security vulnerabilities.
+The HTTP limiter stores startup-salted IP hashes in process memory. Raw addresses are processed briefly to derive a key; proxy and hosting logs remain outside this guarantee. Only explicitly configured proxies may supply forwarded client addresses. Keep exact production CORS origins and one replica; see [operations](docs/OPERATIONS.md).
 
-## Security Guarantees & Boundaries
-
-Spoor implements strict architectural safeguards:
-
-* **Strict SSRF Immunity:** The target parser validates hostnames prior to issuing any HTTP request. All targets must resolve strictly to `github.com` or `www.github.com`. Requests to private subnets, loopback addresses (`127.0.0.1`), link-local metadata endpoints (`169.254.169.254`), or non-GitHub hosts are rejected at parse time.
-* **No Remote Code Execution:** Spoor never runs package managers (`npm`, `cargo`, `pip`, etc.) or executes scripts from target repositories. It operates as an HTTP API client and metadata inspector only.
-* **Ephemeral Abuse Protection:** The hosted HTTP server uses an in-memory salted hash of incoming IP addresses with sliding time windows to enforce rate limits. Raw IP addresses are never persisted to disk or emitted in logs.
-* **Token Isolation:** Server authentication tokens (such as `GITHUB_TOKEN`) remain in server process memory and are never exposed via API endpoints, exports, or error traces.
+Reports and the SQLite cache contain public metadata, including historical identity evidence. Treat cache access and report sharing accordingly. Public data is not proof of identity or permission to contact someone.

@@ -27,7 +27,6 @@ async fn test_server_health_and_lookups() {
 
     let client = Client::new();
 
-    // 1. Check healthz
     let health_resp = client
         .get(format!("http://{addr}/healthz"))
         .send()
@@ -37,7 +36,6 @@ async fn test_server_health_and_lookups() {
     let health_body: serde_json::Value = health_resp.json().await.unwrap();
     assert_eq!(health_body["status"], "ok");
 
-    // 2. Reject SSRF / invalid target
     let bad_req = client
         .post(format!("http://{addr}/v1/lookups"))
         .json(&serde_json::json!({
@@ -48,7 +46,6 @@ async fn test_server_health_and_lookups() {
         .unwrap();
     assert_eq!(bad_req.status(), StatusCode::BAD_REQUEST);
 
-    // 3. Create valid lookup
     let post_resp = client
         .post(format!("http://{addr}/v1/lookups"))
         .json(&serde_json::json!({
@@ -62,7 +59,6 @@ async fn test_server_health_and_lookups() {
     let meta: serde_json::Value = post_resp.json().await.unwrap();
     let lookup_id = meta["id"].as_str().unwrap();
 
-    // 4. Check status
     let get_resp = client
         .get(format!("http://{addr}/v1/lookups/{lookup_id}"))
         .send()
@@ -249,7 +245,7 @@ async fn test_cors_exact_origin_matching() {
     // Test exact origin matching with SPOOR_ALLOWED_ORIGINS
     std::env::set_var(
         "SPOOR_ALLOWED_ORIGINS",
-        "https://voldigoade-portfolio.vercel.app, https://portfolio.example.com",
+        "https://voldigoade.xyz, https://portfolio.example.com",
     );
 
     let engine = test_engine();
@@ -271,7 +267,7 @@ async fn test_cors_exact_origin_matching() {
             reqwest::Method::OPTIONS,
             format!("http://{addr}/v1/lookups"),
         )
-        .header("Origin", "https://voldigoade-portfolio.vercel.app")
+        .header("Origin", "https://voldigoade.xyz")
         .header("Access-Control-Request-Method", "POST")
         .send()
         .await
@@ -280,7 +276,7 @@ async fn test_cors_exact_origin_matching() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
         resp.headers().get("access-control-allow-origin").unwrap(),
-        "https://voldigoade-portfolio.vercel.app"
+        "https://voldigoade.xyz"
     );
 
     // 2. Unauthorized origin: preflight must NOT return access-control-allow-origin
@@ -300,7 +296,6 @@ async fn test_cors_exact_origin_matching() {
         .get("access-control-allow-origin")
         .is_none());
 
-    // Clean up env var
     std::env::remove_var("SPOOR_ALLOWED_ORIGINS");
 }
 

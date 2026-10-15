@@ -85,7 +85,6 @@ pub fn render_terminal_report(report: &Report) {
     );
     println!();
 
-    // Summary Card
     println!(
         "{}",
         bold("── SUMMARY ─────────────────────────────────────────────────────────────")
@@ -145,7 +144,6 @@ pub fn render_terminal_report(report: &Report) {
     }
     println!();
 
-    // Profile (if present)
     if let Some(prof) = &report.profile {
         println!(
             "{}",
@@ -186,7 +184,6 @@ pub fn render_terminal_report(report: &Report) {
         println!();
     }
 
-    // Public Identities
     println!(
         "{}",
         bold("── PUBLIC IDENTITIES (COMMIT HEADERS & PROFILE) ─────────────────────────")
@@ -238,7 +235,6 @@ pub fn render_terminal_report(report: &Report) {
     }
     println!();
 
-    // Repositories sample
     println!(
         "{}",
         bold("── REPOSITORIES (SAMPLE) ────────────────────────────────────────────────")
@@ -271,7 +267,6 @@ pub fn render_terminal_report(report: &Report) {
     }
     println!();
 
-    // Public Keys
     if !report.keys.is_empty() {
         println!(
             "{}",
@@ -288,7 +283,6 @@ pub fn render_terminal_report(report: &Report) {
         println!();
     }
 
-    // Inferences
     if !report.inferences.is_empty() {
         println!(
             "{}",
@@ -308,7 +302,6 @@ pub fn render_terminal_report(report: &Report) {
         println!();
     }
 
-    // Coverage & Provider Status
     println!(
         "{}",
         bold("── COVERAGE & STATUS ───────────────────────────────────────────────────")

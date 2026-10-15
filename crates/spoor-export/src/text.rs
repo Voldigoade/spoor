@@ -23,7 +23,6 @@ pub fn export_text(report: &Report) -> Result<String, SpoorError> {
     .unwrap();
     writeln!(out, "SCHEMA VERSION:  {}", report.schema_version).unwrap();
 
-    // Summary
     writeln!(out, "\n{sub_divider}").unwrap();
     writeln!(out, "SUMMARY").unwrap();
     writeln!(out, "{sub_divider}").unwrap();
@@ -92,7 +91,6 @@ pub fn export_text(report: &Report) -> Result<String, SpoorError> {
         writeln!(out, "Primary Languages:    {langs_str}").unwrap();
     }
 
-    // Profile
     if let Some(prof) = &report.profile {
         writeln!(out, "\n{sub_divider}").unwrap();
         writeln!(out, "PUBLIC PROFILE").unwrap();
@@ -121,7 +119,6 @@ pub fn export_text(report: &Report) -> Result<String, SpoorError> {
         writeln!(out, "Account Age:   {} days", prof.account_age_days).unwrap();
     }
 
-    // Public identities
     writeln!(out, "\n{sub_divider}").unwrap();
     writeln!(out, "PUBLIC IDENTITIES OBSERVED").unwrap();
     writeln!(out, "{sub_divider}").unwrap();
@@ -155,7 +152,6 @@ pub fn export_text(report: &Report) -> Result<String, SpoorError> {
         }
     }
 
-    // Repositories
     writeln!(out, "{sub_divider}").unwrap();
     writeln!(out, "PUBLIC REPOSITORIES (Sample)").unwrap();
     writeln!(out, "{sub_divider}").unwrap();
@@ -187,7 +183,6 @@ pub fn export_text(report: &Report) -> Result<String, SpoorError> {
         .unwrap();
     }
 
-    // Public Keys
     if !report.keys.is_empty() {
         writeln!(out, "\n{sub_divider}").unwrap();
         writeln!(out, "PUBLIC KEYS").unwrap();
@@ -204,7 +199,6 @@ pub fn export_text(report: &Report) -> Result<String, SpoorError> {
         }
     }
 
-    // Inferences
     if !report.inferences.is_empty() {
         writeln!(out, "\n{sub_divider}").unwrap();
         writeln!(out, "INFERENCES").unwrap();
@@ -219,7 +213,6 @@ pub fn export_text(report: &Report) -> Result<String, SpoorError> {
         }
     }
 
-    // Coverage & Provider Status
     writeln!(out, "{sub_divider}").unwrap();
     writeln!(out, "COVERAGE & PROVIDER STATUS").unwrap();
     writeln!(out, "{sub_divider}").unwrap();
@@ -250,7 +243,6 @@ pub fn export_text(report: &Report) -> Result<String, SpoorError> {
         .unwrap();
     }
 
-    // Limitations
     writeln!(out, "\n{sub_divider}").unwrap();
     writeln!(out, "LIMITATIONS").unwrap();
     writeln!(out, "{sub_divider}").unwrap();

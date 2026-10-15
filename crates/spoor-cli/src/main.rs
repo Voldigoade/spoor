@@ -224,7 +224,6 @@ async fn run_inspect(
             })?;
             println!("{} Export saved to {}", green("[ok]"), bold(dest_path));
         } else {
-            // Write to stdout
             match String::from_utf8(bytes) {
                 Ok(s) => print!("{s}"),
                 Err(_) => {

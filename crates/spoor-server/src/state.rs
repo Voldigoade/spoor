@@ -33,15 +33,9 @@ pub struct LookupEntry {
     pub event_tx: broadcast::Sender<SpoorEvent>,
 }
 
-/// Operational note on concurrency & clustering:
-///
-/// Spoor v0.1 server maintains active lookup states, SSE broadcast channels, and
-/// ephemeral IP rate limits in process-local memory.
-///
-/// OPERATIONAL REQUIREMENT:
-/// Spoor v0.1 server must run as a single application replica unless a shared lookup/job
-/// state implementation is introduced. Horizontal scaling behind a multi-node round-robin
-/// load balancer will cause partitioned SSE event delivery and disjoint rate-limiting.
+/// Lookup state, SSE channels and rate limits are process-local.
+/// Run one replica until shared job state is implemented; otherwise requests
+/// can reach a replica that does not own the lookup or its event stream.
 #[derive(Clone)]
 pub struct AppState {
     pub engine: Arc<AnalysisEngine>,
@@ -181,7 +175,7 @@ impl AppState {
     }
 
     /// Prune completed and failed lookups that exceed `retention_duration`.
-    /// Pending and running lookups are NEVER evicted.
+    /// Age is measured from creation; pending and running lookups are retained.
     pub async fn prune_expired_lookups(&self) -> usize {
         let now = Utc::now();
         let retention = chrono::Duration::from_std(self.retention_duration)

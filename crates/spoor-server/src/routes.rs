@@ -87,10 +87,8 @@ pub async fn create_lookup_handler(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(payload): Json<CreateLookupRequest>,
 ) -> Response {
-    // 1. Periodically prune expired lookups from process memory
     let _ = state.prune_expired_lookups().await;
 
-    // 2. Validate analysis mode against public instance policy
     let mode = payload.mode.unwrap_or(AnalysisMode::Fast);
     let enrich = payload.enrich.unwrap_or(false);
 
@@ -105,7 +103,6 @@ pub async fn create_lookup_handler(
             .into_response();
     }
 
-    // 3. Rate limiting (per-IP and global anti-abuse)
     let client_ip = state.proxy_config.resolve_client_ip(addr.ip(), &headers);
 
     let rate_limit_res = {
@@ -130,7 +127,6 @@ pub async fn create_lookup_handler(
             .into_response();
     }
 
-    // 4. Parse target with strict SSRF validation
     let target = match Target::parse(&payload.target) {
         Ok(t) => t,
         Err(e) => {
@@ -164,7 +160,6 @@ pub async fn create_lookup_handler(
         map.insert(id, entry);
     }
 
-    // 5. Spawn background execution
     let bg_state = state.clone();
     let bg_target = target.clone();
     let bg_id = id;
@@ -172,7 +167,6 @@ pub async fn create_lookup_handler(
     let bg_bcast = broadcast_tx;
 
     tokio::spawn(async move {
-        // Mark status as running
         {
             let mut map = bg_state.lookups.write().await;
             if let Some(e) = map.get_mut(&bg_id) {
@@ -180,7 +174,6 @@ pub async fn create_lookup_handler(
             }
         }
 
-        // Channel bridge for progress events
         let (mpsc_tx, mut mpsc_rx) = mpsc::channel::<SpoorEvent>(64);
         let bcast_forward = bg_bcast.clone();
         tokio::spawn(async move {
@@ -189,7 +182,6 @@ pub async fn create_lookup_handler(
             }
         });
 
-        // Bounded concurrency semaphore
         let _permit = bg_state.concurrency_semaphore.acquire().await;
         let res = bg_state
             .engine
