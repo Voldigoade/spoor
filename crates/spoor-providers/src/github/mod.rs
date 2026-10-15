@@ -8,8 +8,8 @@ use spoor_core::SpoorError;
 
 use self::graphql::GitHubGraphQLClient;
 use self::models::{
-    GhCommitItem, GhCommitSearchResult, GhCommunityProfile, GhEvent, GhGpgKey, GhRepo, GhSshKey,
-    GhTreeResponse, GhUser,
+    GhCommitItem, GhCommitSearchResult, GhCommunityProfile, GhEventBatch, GhGpgKey, GhRepo,
+    GhSshKey, GhTreeResponse, GhUser,
 };
 use self::rest::GitHubRestClient;
 use crate::client::HttpClient;
@@ -73,7 +73,7 @@ impl GitHubProvider {
         &self,
         username: &str,
         limit: usize,
-    ) -> Result<Vec<GhEvent>, SpoorError> {
+    ) -> Result<GhEventBatch, SpoorError> {
         self.rest.get_user_events(username, limit).await
     }
 

@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, LINK};
 use reqwest::{Method, StatusCode};
 use spoor_core::SpoorError;
 use tracing::debug;
 
 use super::models::{
-    GhCommitItem, GhCommitSearchResult, GhCommunityProfile, GhEvent, GhGpgKey, GhRepo, GhSshKey,
-    GhTreeResponse, GhUser,
+    GhCommitItem, GhCommitSearchResult, GhCommunityProfile, GhEvent, GhEventBatch, GhGpgKey,
+    GhRepo, GhSshKey, GhTreeResponse, GhUser,
 };
 use crate::client::HttpClient;
 
@@ -288,52 +288,153 @@ impl GitHubRestClient {
         &self,
         username: &str,
         limit: usize,
-    ) -> Result<Vec<GhEvent>, SpoorError> {
-        let per_page = 100.min(limit);
-        let url = format!(
-            "{}/users/{username}/events/public?per_page={per_page}",
-            self.base_url
-        );
-        let headers = self.headers();
-
-        let resp = self
-            .client
-            .send_with_retry(
-                || {
-                    self.client
-                        .request(Method::GET, &url)
-                        .headers(headers.clone())
-                },
-                2,
-            )
-            .await?;
-
-        let status = resp.status();
-        if status == StatusCode::NOT_FOUND {
-            return Ok(Vec::new());
-        }
-        if status == StatusCode::FORBIDDEN || status == StatusCode::TOO_MANY_REQUESTS {
-            return Err(SpoorError::RateLimitExceeded {
-                provider: "GitHub REST".to_string(),
-                reset_at: self.client.rate_limit.reset_at(),
-                retry_after: None,
-            });
-        }
-        if !status.is_success() {
-            return Err(SpoorError::ProviderError {
-                provider: "GitHub REST".to_string(),
-                message: format!("Events lookup for {username} returned HTTP status {status}"),
+    ) -> Result<GhEventBatch, SpoorError> {
+        const MAX_PAGES: usize = 3;
+        const MAX_EVENTS: usize = 300;
+        let event_limit = limit.min(MAX_EVENTS);
+        if event_limit == 0 {
+            return Ok(GhEventBatch {
+                events: Vec::new(),
+                is_complete: true,
+                warning: None,
             });
         }
 
-        let body = HttpClient::read_body_limited(resp).await?;
-        let mut events: Vec<GhEvent> = serde_json::from_str(&body).map_err(|e| {
-            SpoorError::Serialization(format!("Failed to parse events for {username}: {e}"))
-        })?;
-        if events.len() > limit {
-            events.truncate(limit);
+        let per_page = 100.min(event_limit);
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+        let mut events = Vec::with_capacity(event_limit);
+        let mut warning = None;
+        let mut reached_end = false;
+        let mut collected_page = false;
+
+        for page in 1..=MAX_PAGES {
+            let url = format!(
+                "{}/users/{username}/events/public?per_page={per_page}&page={page}",
+                self.base_url
+            );
+            let headers = self.headers();
+            let response = self
+                .client
+                .send_with_retry(
+                    || {
+                        self.client
+                            .request(Method::GET, &url)
+                            .headers(headers.clone())
+                    },
+                    2,
+                )
+                .await;
+
+            let resp = match response {
+                Ok(resp) => resp,
+                Err(error) => {
+                    if !collected_page {
+                        return Err(error);
+                    }
+                    warning = Some(format!(
+                        "Public events page {page} failed after {} events: {error}",
+                        events.len()
+                    ));
+                    break;
+                }
+            };
+
+            let status = resp.status();
+            if !status.is_success() {
+                let message = format!("Public events page {page} returned HTTP status {status}");
+                if !collected_page {
+                    if status == StatusCode::FORBIDDEN || status == StatusCode::TOO_MANY_REQUESTS {
+                        return Err(SpoorError::RateLimitExceeded {
+                            provider: "GitHub REST".to_string(),
+                            reset_at: self.client.rate_limit.reset_at(),
+                            retry_after: None,
+                        });
+                    }
+                    return Err(SpoorError::ProviderError {
+                        provider: "GitHub REST".to_string(),
+                        message,
+                    });
+                }
+                warning = Some(message);
+                break;
+            }
+
+            let has_next = resp
+                .headers()
+                .get(LINK)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|links| {
+                    links.split(',').any(|link| {
+                        link.split(';').any(|parameter| {
+                            let parameter = parameter.trim();
+                            parameter.eq_ignore_ascii_case("rel=\"next\"")
+                                || parameter.eq_ignore_ascii_case("rel=next")
+                        })
+                    })
+                });
+            let body = match HttpClient::read_body_limited(resp).await {
+                Ok(body) => body,
+                Err(error) => {
+                    if !collected_page {
+                        return Err(error);
+                    }
+                    warning = Some(format!(
+                        "Public events page {page} could not be read after {} events: {error}",
+                        events.len()
+                    ));
+                    break;
+                }
+            };
+            let page_events = match serde_json::from_str::<Vec<GhEvent>>(&body) {
+                Ok(page_events) => page_events,
+                Err(error) => {
+                    if !collected_page {
+                        return Err(SpoorError::Serialization(error.to_string()));
+                    }
+                    warning = Some(format!(
+                        "Public events page {page} could not be decoded after {} events: {error}",
+                        events.len()
+                    ));
+                    break;
+                }
+            };
+            let page_len = page_events.len();
+            collected_page = true;
+            let remaining = event_limit.saturating_sub(events.len());
+
+            events.extend(
+                page_events
+                    .into_iter()
+                    .filter(|event| event.created_at >= cutoff)
+                    .take(remaining),
+            );
+
+            if events.len() >= event_limit {
+                events.truncate(event_limit);
+                if event_limit == MAX_EVENTS && page == MAX_PAGES && has_next {
+                    warning =
+                        Some("GitHub's three-page public-events cap was reached.".to_string());
+                } else {
+                    reached_end = true;
+                }
+                break;
+            }
+
+            if page_len < per_page || !has_next {
+                reached_end = true;
+                break;
+            }
+
+            if page == MAX_PAGES {
+                warning = Some("GitHub's three-page public-events cap was reached.".to_string());
+            }
         }
-        Ok(events)
+
+        Ok(GhEventBatch {
+            events,
+            is_complete: reached_end || warning.is_none(),
+            warning,
+        })
     }
 
     pub async fn get_user_gpg_keys(&self, username: &str) -> Result<Vec<GhGpgKey>, SpoorError> {

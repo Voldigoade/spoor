@@ -314,17 +314,17 @@ async fn test_engine_user_deep_flow_with_gitleak_and_repo_hygiene() {
     let gitleak_json = r#"{
         "emails": [
             {
-                "email": "contact@anonseclab.org",
-                "committer": "AnonSecLab",
-                "commitUrl": "https://github.com/Pratyush130/Rust-Complete-Pack2/commit/caf051bdcbba3caed40a5e60ba861033662dd4ce"
+                "email": "user@example.com",
+                "committer": "ExampleUser",
+                "commitUrl": "https://github.com/example-user/example-repo/commit/caf051bdcbba3caed40a5e60ba861033662dd4ce"
             }
         ],
         "metadata": {
             "totalCommitsProcessed": 100,
             "emailsFound": 1,
-            "filteredOutEmails": ["245930475+Voldigoade@users.noreply.github.com"],
+            "filteredOutEmails": ["123456+example-user@users.noreply.github.com"],
             "executionTimeMs": 240,
-            "discoveredUsernames": ["bob", "AnonSecLab"],
+            "discoveredUsernames": ["bob", "ExampleUser"],
             "gpgKeys": [
                 {
                     "keyId": "GPG_KEY_FROM_GITLEAK"
@@ -428,7 +428,7 @@ async fn test_engine_user_deep_flow_with_gitleak_and_repo_hygiene() {
         .expect("Languages must be populated for scanned repo");
     assert_eq!(langs.get("Rust"), Some(&50000));
 
-    // We expect: bob@company.com, noreply@github.com, and contact@anonseclab.org
+    // We expect: bob@company.com, noreply@github.com, and user@example.com
     assert_eq!(report.identities.len(), 3);
 
     // bob@company.com: author == committer, commits_observed must be 1 (NOT 2)
@@ -453,19 +453,19 @@ async fn test_engine_user_deep_flow_with_gitleak_and_repo_hygiene() {
     assert_eq!(sys_id.email_type, EmailType::GitHubSystem);
     assert!(sys_id.email_type.is_platform_system());
 
-    // contact@anonseclab.org: must preserve GitLeak finding, committer name, and extracted repo
+    // user@example.com: must preserve GitLeak finding, committer name, and extracted repo
     let gl_id = report
         .identities
         .iter()
-        .find(|i| i.email == "contact@anonseclab.org")
+        .find(|i| i.email == "user@example.com")
         .unwrap();
-    assert_eq!(gl_id.name.as_deref(), Some("AnonSecLab"));
-    assert_eq!(gl_id.repositories, vec!["Pratyush130/Rust-Complete-Pack2"]);
+    assert_eq!(gl_id.name.as_deref(), Some("ExampleUser"));
+    assert_eq!(gl_id.repositories, vec!["example-user/example-repo"]);
     assert!(gl_id.sources.contains(&"GitLeak".to_string()));
     assert_eq!(gl_id.commits_observed, 1);
 
     // 4. Verify Summary Metrics: distinct_emails_observed must EXCLUDE platform system bots
-    // Here: bob@company.com and contact@anonseclab.org = 2 distinct emails
+    // Here: bob@company.com and user@example.com = 2 distinct emails
     assert_eq!(report.summary.distinct_emails_observed, 2);
 
     // 5. Verify Public Keys Reconciled from GitLeak
@@ -491,11 +491,11 @@ async fn test_engine_user_deep_flow_with_gitleak_and_repo_hygiene() {
         .unwrap();
     assert_eq!(
         gl_prov.source_url.as_deref(),
-        Some("https://github.com/Pratyush130/Rust-Complete-Pack2/commit/caf051bdcbba3caed40a5e60ba861033662dd4ce")
+        Some("https://github.com/example-user/example-repo/commit/caf051bdcbba3caed40a5e60ba861033662dd4ce")
     );
     assert_eq!(
         gl_prov.repository.as_deref(),
-        Some("Pratyush130/Rust-Complete-Pack2")
+        Some("example-user/example-repo")
     );
 }
 

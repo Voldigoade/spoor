@@ -562,22 +562,15 @@ impl AnalysisEngine {
         )
         .await;
 
-        let events_res = self.github.fetch_user_events(username, 100).await;
-        let events = match events_res {
-            Ok(evs) => {
-                report.provider_status.insert(
-                    "GitHub Events".to_string(),
-                    ProviderStatus {
-                        status: ProviderHealth::Ok,
-                        latency_ms: None,
-                        items_retrieved: Some(evs.len()),
-                        rate_limit_remaining: Some(self.github.rest.rate_limit_remaining()),
-                        rate_limit_reset: None,
-                        retry_after_seconds: None,
-                        message: None,
-                    },
-                );
-                for ev in &evs {
+        let event_result = self.github.fetch_user_events(username, 300).await;
+        let (events, event_warning, event_health) = match event_result {
+            Ok(batch) => {
+                let health = if batch.is_complete {
+                    ProviderHealth::Ok
+                } else {
+                    ProviderHealth::Partial
+                };
+                for ev in &batch.events {
                     let repo_name = ev.repo.name.clone();
                     let parts: Vec<&str> = repo_name.split('/').collect();
                     if parts.len() == 2 {
@@ -599,27 +592,41 @@ impl AnalysisEngine {
                         }
                     }
                 }
-                evs
+                (batch.events, batch.warning, health)
             }
-            Err(e) => {
-                report.provider_status.insert(
-                    "GitHub Events".to_string(),
-                    ProviderStatus {
-                        status: ProviderHealth::Partial,
-                        latency_ms: None,
-                        items_retrieved: Some(0),
-                        rate_limit_remaining: Some(self.github.rest.rate_limit_remaining()),
-                        rate_limit_reset: None,
-                        retry_after_seconds: None,
-                        message: Some(e.to_string()),
-                    },
-                );
+            Err(error) => {
+                let health = if matches!(&error, SpoorError::RateLimitExceeded { .. }) {
+                    ProviderHealth::RateLimited
+                } else {
+                    ProviderHealth::Unavailable
+                };
                 report
                     .warnings
-                    .push(format!("Failed to retrieve public events: {e}"));
-                Vec::new()
+                    .push(format!("Failed to retrieve public events: {error}"));
+                (
+                    Vec::new(),
+                    Some(format!("Public events request failed: {error}")),
+                    health,
+                )
             }
         };
+        let base_event_note = "GitHub public events cover only the previous 30 days, up to 300 events. Spoor requests up to three pages of 100 and filters older results.";
+        let window_note = event_warning.as_ref().map_or_else(
+            || base_event_note.to_string(),
+            |warning| format!("{base_event_note} {warning}"),
+        );
+        report.provider_status.insert(
+            "Public Events".to_string(),
+            ProviderStatus {
+                status: event_health,
+                latency_ms: None,
+                items_retrieved: Some(events.len()),
+                rate_limit_remaining: Some(self.github.rest.rate_limit_remaining()),
+                rate_limit_reset: None,
+                retry_after_seconds: None,
+                message: event_warning,
+            },
+        );
 
         let mut candidate_list: Vec<CandidateRepoEntry> = candidate_map.values().cloned().collect();
         candidate_list.sort_by_key(|c| {
@@ -945,7 +952,7 @@ impl AnalysisEngine {
         );
 
         let mut activity_report = ActivityReport {
-            window_note: "Public event retention window is limited to events from the previous 30 days and up to 300 events by GitHub API.".to_string(),
+            window_note,
             total_events_observed: events.len(),
             ..Default::default()
         };

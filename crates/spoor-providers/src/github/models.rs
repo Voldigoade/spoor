@@ -112,6 +112,13 @@ pub struct GhEvent {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GhEventBatch {
+    pub events: Vec<GhEvent>,
+    pub is_complete: bool,
+    pub warning: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GhGpgEmail {
     pub email: String,
