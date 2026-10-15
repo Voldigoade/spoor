@@ -1032,3 +1032,182 @@ async fn test_graphql_historical_years_traversal() {
     assert!(res.fully_traversed);
     assert!(!res.contributions.is_empty());
 }
+
+#[tokio::test]
+async fn test_commit_search_bisection_on_oversized_window() {
+    let gh_mock = MockServer::start().await;
+    let gl_mock = MockServer::start().await;
+
+    let user_json = r#"{
+        "login": "charlie",
+        "id": 7777,
+        "avatar_url": "https://avatars.githubusercontent.com/u/7777",
+        "html_url": "https://github.com/charlie",
+        "name": "Charlie Tester",
+        "company": null,
+        "blog": "",
+        "location": null,
+        "email": null,
+        "bio": null,
+        "twitter_username": null,
+        "public_repos": 0,
+        "public_gists": 0,
+        "followers": 10,
+        "following": 5,
+        "created_at": "2024-01-01T00:00:00Z",
+        "updated_at": "2024-06-01T00:00:00Z"
+    }"#;
+
+    Mock::given(method("GET"))
+        .and(path("/users/charlie"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(user_json))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/charlie/repos"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/charlie/gpg_keys"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/charlie/keys"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/charlie/events/public"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/charlie/starred"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+
+    let gql_empty = r#"{
+        "data": {
+            "user": {
+                "contributionsCollection": {
+                    "contributionYears": [],
+                    "totalCommitContributions": 0,
+                    "contributionCalendar": { "totalContributions": 0 },
+                    "commitContributionsByRepository": []
+                }
+            }
+        }
+    }"#;
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(gql_empty))
+        .mount(&gh_mock)
+        .await;
+
+    // When full window is queried without author-date filter, return total_count > 300 to trigger bisection
+    struct NoDateFilterMatcher;
+    impl wiremock::Match for NoDateFilterMatcher {
+        fn matches(&self, request: &wiremock::Request) -> bool {
+            let q = request.url.query().unwrap_or("");
+            q.contains("author%3Acharlie") && !q.contains("author-date")
+        }
+    }
+
+    let oversized_json = r#"{
+        "total_count": 450,
+        "incomplete_results": false,
+        "items": []
+    }"#;
+
+    Mock::given(method("GET"))
+        .and(path("/search/commits"))
+        .and(NoDateFilterMatcher)
+        .respond_with(ResponseTemplate::new(200).set_body_string(oversized_json))
+        .mount(&gh_mock)
+        .await;
+
+    // Bisected sub-window containing author-date returns bounded results
+    struct HasDateFilterMatcher;
+    impl wiremock::Match for HasDateFilterMatcher {
+        fn matches(&self, request: &wiremock::Request) -> bool {
+            let q = request.url.query().unwrap_or("");
+            q.contains("author%3Acharlie") && q.contains("author-date")
+        }
+    }
+
+    let partitioned_json = r#"{
+        "total_count": 1,
+        "incomplete_results": false,
+        "items": [
+            {
+                "sha": "split1111",
+                "html_url": "https://github.com/external/split-repo/commit/split1111",
+                "commit": {
+                    "author": { "name": "Charlie", "email": "charlie@split.org", "date": "2024-02-15T12:00:00Z" },
+                    "committer": { "name": "Charlie", "email": "charlie@split.org", "date": "2024-02-15T12:00:00Z" },
+                    "message": "fix: bisected commit discovery"
+                },
+                "author": { "login": "charlie", "id": 7777 },
+                "committer": null,
+                "repository": { "id": 555, "name": "split-repo", "full_name": "external/split-repo", "html_url": "https://github.com/external/split-repo", "fork": false }
+            }
+        ]
+    }"#;
+
+    Mock::given(method("GET"))
+        .and(path("/search/commits"))
+        .and(HasDateFilterMatcher)
+        .respond_with(ResponseTemplate::new(200).set_body_string(partitioned_json))
+        .mount(&gh_mock)
+        .await;
+
+    // Committer query returns 0
+    let empty_search_json = r#"{
+        "total_count": 0,
+        "incomplete_results": false,
+        "items": []
+    }"#;
+
+    Mock::given(method("GET"))
+        .and(path("/search/commits"))
+        .and(wiremock::matchers::query_param("q", "committer:charlie"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(empty_search_json))
+        .mount(&gh_mock)
+        .await;
+
+    let http = HttpClient::new();
+    let gh_provider = GitHubProvider::new(
+        http.clone(),
+        Some("test_tok".to_string()),
+        Some(gh_mock.uri()),
+        Some(format!("{}/graphql", gh_mock.uri())),
+    );
+    let gl_client = GitLeakClient::new(http, Some(gl_mock.uri()));
+    let cache = Arc::new(NoopCacheStore);
+    let engine = AnalysisEngine::new(gh_provider, gl_client, cache);
+    let target = Target::parse("charlie").unwrap();
+
+    let report = engine
+        .run_analysis(&target, AnalysisOptions::deep(), None)
+        .await
+        .unwrap();
+
+    assert!(report.coverage.discovery.is_some());
+    let disc = report.coverage.discovery.as_ref().unwrap();
+    // Bisection resulted in at least one completed bounded sub-window
+    assert!(disc.commit_search_windows_complete >= 1);
+    assert_eq!(disc.global_author_commits_found, 1);
+    assert!(report
+        .identities
+        .iter()
+        .any(|id| id.email == "charlie@split.org"));
+}
