@@ -90,41 +90,56 @@ fn sanitize_pdf_text(s: &str) -> String {
 }
 
 fn wrap_text(s: &str, max_chars: usize) -> Vec<String> {
-    if s.is_empty() {
+    if s.is_empty() || max_chars == 0 {
         return Vec::new();
     }
     let mut lines = Vec::new();
     let mut current = String::new();
+    let mut current_chars = 0usize;
 
     for word in s.split_whitespace() {
-        if current.is_empty() {
-            if word.len() > max_chars {
+        let word_chars = word.chars().count();
+        if current_chars == 0 {
+            if word_chars > max_chars {
                 let mut remaining = word;
-                while remaining.len() > max_chars {
-                    let (head, tail) = remaining.split_at(max_chars);
-                    lines.push(head.to_string());
-                    remaining = tail;
+                while remaining.chars().count() > max_chars {
+                    let split_byte_idx = remaining
+                        .char_indices()
+                        .nth(max_chars)
+                        .map(|(idx, _)| idx)
+                        .unwrap_or(remaining.len());
+                    lines.push(remaining[..split_byte_idx].to_string());
+                    remaining = &remaining[split_byte_idx..];
                 }
                 current.push_str(remaining);
+                current_chars = remaining.chars().count();
             } else {
                 current.push_str(word);
+                current_chars = word_chars;
             }
-        } else if current.len() + 1 + word.len() <= max_chars {
+        } else if current_chars + 1 + word_chars <= max_chars {
             current.push(' ');
             current.push_str(word);
+            current_chars += 1 + word_chars;
         } else {
             lines.push(current);
             current = String::new();
-            if word.len() > max_chars {
+            if word_chars > max_chars {
                 let mut remaining = word;
-                while remaining.len() > max_chars {
-                    let (head, tail) = remaining.split_at(max_chars);
-                    lines.push(head.to_string());
-                    remaining = tail;
+                while remaining.chars().count() > max_chars {
+                    let split_byte_idx = remaining
+                        .char_indices()
+                        .nth(max_chars)
+                        .map(|(idx, _)| idx)
+                        .unwrap_or(remaining.len());
+                    lines.push(remaining[..split_byte_idx].to_string());
+                    remaining = &remaining[split_byte_idx..];
                 }
                 current.push_str(remaining);
+                current_chars = remaining.chars().count();
             } else {
                 current.push_str(word);
+                current_chars = word_chars;
             }
         }
     }
@@ -270,35 +285,51 @@ impl PdfLayoutEngine {
     }
 
     fn add_table_row(&mut self, cols: &[(&str, f32, bool)]) {
-        self.ensure_space(14.0);
-        let p = &mut self.current;
-        let row_y = self.y - 11.0;
+        let col_lines: Vec<(Vec<String>, f32, bool)> = cols
+            .iter()
+            .map(|(val, width, is_bold)| {
+                let max_chars = (*width / 5.2).floor() as usize;
+                let max_chars = max_chars.max(4);
+                let lines = wrap_text(val, max_chars);
+                let lines = if lines.is_empty() {
+                    vec![String::new()]
+                } else {
+                    lines
+                };
+                (lines, *width, *is_bold)
+            })
+            .collect();
 
+        let row_lines = col_lines
+            .iter()
+            .map(|(lines, _, _)| lines.len())
+            .max()
+            .unwrap_or(1);
+        let line_height = 10.5;
+        let total_row_height = (row_lines as f32) * line_height + 3.0;
+
+        self.ensure_space(total_row_height);
+
+        let start_y = self.y - 9.0;
         let mut current_x = self.left_margin + 5.0;
-        for (val, width, is_bold) in cols {
-            let font = if *is_bold { "/F2" } else { "/F1" };
-            let max_chars = (*width / 5.0) as usize;
-            let fitted_val = if val.chars().count() > max_chars && max_chars > 3 {
-                let truncated: String = val.chars().take(max_chars - 1).collect();
-                format!("{truncated}...")
-            } else {
-                val.to_string()
-            };
 
-            p.extend_from_slice(
-                format!(
-                    "BT {} 8 Tf 0.15 0.15 0.15 rg {} {} Td ({}) Tj ET\n",
-                    font,
-                    current_x,
-                    row_y,
-                    sanitize_pdf_text(&fitted_val)
-                )
-                .as_bytes(),
-            );
+        for (lines, width, is_bold) in &col_lines {
+            let font = if *is_bold { "/F2" } else { "/F1" };
+            for (line_idx, line) in lines.iter().enumerate() {
+                let line_y = start_y - (line_idx as f32) * line_height;
+                let sanitized = sanitize_pdf_text(line);
+                self.current.extend_from_slice(
+                    format!(
+                        "BT {} 8 Tf 0.15 0.15 0.15 rg {} {} Td ({}) Tj ET\n",
+                        font, current_x, line_y, sanitized
+                    )
+                    .as_bytes(),
+                );
+            }
             current_x += width;
         }
 
-        self.y -= 13.0;
+        self.y -= total_row_height;
     }
 
     fn add_key_value(&mut self, key: &str, val: &str) {
@@ -813,5 +844,116 @@ mod tests {
         for line in &lines {
             assert!(line.len() <= 40);
         }
+    }
+
+    #[test]
+    fn test_wrap_text_unicode_safety_repeated_accents() {
+        let repeated = "é".repeat(100) + &"ñ".repeat(100) + &"ü".repeat(100) + &"œ".repeat(100);
+        for max_chars in [1, 2, 3, 7, 10, 15, 33, 50, 77] {
+            let lines = wrap_text(&repeated, max_chars);
+            assert!(!lines.is_empty());
+            for line in lines {
+                assert!(line.chars().count() <= max_chars);
+            }
+        }
+    }
+
+    #[test]
+    fn test_table_variable_height_wrapped_rows_no_truncation() {
+        let mut report = Report::new(
+            Target::User {
+                username: "voldigoade".into(),
+            },
+            AnalysisMode::Fast,
+        );
+
+        let long_email = "verylongsubdomainandaddress.contributor@extremely-long-department-domain.organization.edu";
+        report.identities.push(spoor_core::IdentityRecord {
+            name: Some("Long Name User".into()),
+            email: long_email.into(),
+            email_type: spoor_core::EmailType::DomainEmail,
+            first_seen: None,
+            last_seen: None,
+            commits_observed: 42,
+            repositories: vec!["repo".into()],
+            sources: vec!["Git".into()],
+            is_verified_signer: false,
+        });
+
+        let long_repo =
+            "enterprise-infrastructure-systems-and-networking-research-lab-component-archive";
+        report.repositories.push(spoor_core::RepoReport {
+            name: long_repo.into(),
+            full_name: format!("voldigoade/{long_repo}"),
+            description: Some("Long repo description".into()),
+            is_fork: false,
+            is_archived: false,
+            default_branch: "main".into(),
+            stars: 12,
+            forks: 3,
+            open_issues: 0,
+            size_kb: 1024,
+            primary_language: Some("Rust".into()),
+            languages: None,
+            created_at: None,
+            updated_at: None,
+            pushed_at: None,
+            topics: vec![],
+            license_spdx: Some("MIT".into()),
+            hygiene: None,
+            html_url: format!("https://github.com/voldigoade/{long_repo}"),
+        });
+
+        let long_provider_msg = "Upstream GitHub REST API returned HTTP 429 rate limit exceeded; secondary rate limiting activated by token budget manager after 500 requests";
+        report.provider_status.insert(
+            "GitHub REST Extended Inspection".into(),
+            spoor_core::ProviderStatus {
+                status: spoor_core::ProviderHealth::Partial,
+                latency_ms: Some(150),
+                items_retrieved: Some(25),
+                rate_limit_remaining: Some(0),
+                rate_limit_reset: None,
+                retry_after_seconds: Some(60),
+                message: Some(long_provider_msg.into()),
+            },
+        );
+
+        let bytes = export_pdf(&report).unwrap();
+        assert!(bytes.starts_with(b"%PDF-1.4"));
+
+        use std::io::Read;
+        let mut page_text = String::new();
+        let mut remaining = &bytes[..];
+        while let Some(stream_start) = remaining.windows(7).position(|w| w == b"stream\n") {
+            let data_start = stream_start + 7;
+            if let Some(stream_end) = remaining[data_start..]
+                .windows(10)
+                .position(|w| w == b"\nendstream")
+            {
+                let compressed_data = &remaining[data_start..data_start + stream_end];
+                let mut decoder = flate2::read::ZlibDecoder::new(compressed_data);
+                let mut decoded = String::new();
+                if decoder.read_to_string(&mut decoded).is_ok() {
+                    page_text.push_str(&decoded);
+                }
+                remaining = &remaining[data_start + stream_end + 10..];
+            } else {
+                break;
+            }
+        }
+
+        // Verify that the table output does NOT contain ellipses for these long values
+        assert!(!page_text.contains("verylongsubdomainand..."));
+        assert!(!page_text.contains("enterprise-infrastru..."));
+        assert!(!page_text.contains("Upstream GitHub REST..."));
+
+        // Verify that all wrapped lines of the long strings are present in the decompressed PDF stream
+        assert!(page_text.contains("verylongsubdomainandaddress.contrib"));
+        assert!(page_text.contains("utor@extremely-long-department-doma"));
+        assert!(page_text.contains("in.organization.edu"));
+        assert!(page_text.contains("enterprise-infrastructure-systems-and-"));
+        assert!(page_text.contains("networking-research-lab-component-arch"));
+        assert!(page_text.contains("Upstream GitHub REST API"));
+        assert!(page_text.contains("returned HTTP 429 rate limit"));
     }
 }

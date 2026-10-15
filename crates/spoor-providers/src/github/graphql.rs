@@ -1,3 +1,4 @@
+use chrono::Datelike;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
@@ -53,7 +54,9 @@ pub struct GhGraphQLUserContributionsNode {
 pub struct GhGraphQLContributionsCollection {
     #[serde(rename = "contributionYears", default)]
     pub contribution_years: Vec<i32>,
-    #[serde(rename = "commitContributionsByRepository")]
+    #[serde(rename = "totalRepositoriesWithContributedCommits", default)]
+    pub total_repositories_with_contributed_commits: usize,
+    #[serde(rename = "commitContributionsByRepository", default)]
     pub commit_contributions_by_repository: Vec<GhGraphQLContributionByRepo>,
 }
 
@@ -231,12 +234,57 @@ impl GitHubGraphQLClient {
         login: &str,
         max_historical_years: usize,
     ) -> Result<HistoricalContributionsResult, SpoorError> {
-        let query = r#"
+        let years_query = r#"
             query($login: String!) {
               user(login: $login) {
                 contributionsCollection {
                   contributionYears
-                  commitContributionsByRepository(maxRepositories: 50) {
+                }
+              }
+            }
+        "#;
+
+        let variables = serde_json::json!({ "login": login });
+        let res: GhGraphQLUserContributions = self.query(years_query, variables).await?;
+
+        let user_node = match res.user {
+            Some(u) => u,
+            None => {
+                return Ok(HistoricalContributionsResult {
+                    contributions: Vec::new(),
+                    years_discovered: Vec::new(),
+                    years_queried: Vec::new(),
+                    fully_traversed: true,
+                });
+            }
+        };
+
+        let years_discovered = user_node
+            .contributions_collection
+            .contribution_years
+            .clone();
+
+        if years_discovered.is_empty() {
+            return Ok(HistoricalContributionsResult {
+                contributions: Vec::new(),
+                years_discovered: Vec::new(),
+                years_queried: Vec::new(),
+                fully_traversed: true,
+            });
+        }
+
+        let current_year = chrono::Utc::now().date_naive().year();
+        let mut years_queried = Vec::new();
+        let mut map: std::collections::HashMap<String, HistoricalContributionRepo> =
+            std::collections::HashMap::new();
+        let mut any_repository_truncated = false;
+
+        let calendar_query = r#"
+            query($login: String!, $from: DateTime!, $to: DateTime!) {
+              user(login: $login) {
+                contributionsCollection(from: $from, to: $to) {
+                  totalRepositoriesWithContributedCommits
+                  commitContributionsByRepository(maxRepositories: 100) {
                     repository {
                       nameWithOwner
                       name
@@ -255,93 +303,45 @@ impl GitHubGraphQLClient {
             }
         "#;
 
-        let variables = serde_json::json!({ "login": login });
-        let res: GhGraphQLUserContributions = self.query(query, variables).await?;
+        let years_to_process = years_discovered
+            .iter()
+            .copied()
+            .take(max_historical_years.max(1))
+            .collect::<Vec<_>>();
 
-        let user_node = match res.user {
-            Some(u) => u,
-            None => {
-                return Ok(HistoricalContributionsResult {
-                    contributions: Vec::new(),
-                    years_discovered: Vec::new(),
-                    years_queried: Vec::new(),
-                    fully_traversed: true,
-                });
-            }
-        };
+        for year in &years_to_process {
+            let (from, to) = if *year >= current_year {
+                (
+                    format!("{year}-01-01T00:00:00Z"),
+                    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                )
+            } else {
+                (
+                    format!("{year}-01-01T00:00:00Z"),
+                    format!("{year}-12-31T23:59:59Z"),
+                )
+            };
 
-        let years_discovered = user_node
-            .contributions_collection
-            .contribution_years
-            .clone();
-        let mut years_queried = Vec::new();
-        let mut map: std::collections::HashMap<String, HistoricalContributionRepo> =
-            std::collections::HashMap::new();
+            let cal_vars = serde_json::json!({
+                "login": login,
+                "from": from,
+                "to": to,
+            });
 
-        let initial_year = years_discovered.first().copied().unwrap_or(2026);
-        years_queried.push(initial_year);
-
-        for item in user_node
-            .contributions_collection
-            .commit_contributions_by_repository
-        {
-            let commits = item.contributions.map(|c| c.total_count).unwrap_or(1);
-            let entry = map
-                .entry(item.repository.name_with_owner.clone())
-                .or_insert_with(|| HistoricalContributionRepo {
-                    repository: item.repository,
-                    years: Vec::new(),
-                    total_commits: 0,
-                });
-            if !entry.years.contains(&initial_year) {
-                entry.years.push(initial_year);
-            }
-            entry.total_commits += commits;
-        }
-
-        if max_historical_years > 0 && years_discovered.len() > 1 {
-            let historical_query = r#"
-                query($login: String!, $from: DateTime!, $to: DateTime!) {
-                  user(login: $login) {
-                    contributionsCollection(from: $from, to: $to) {
-                      commitContributionsByRepository(maxRepositories: 50) {
-                        repository {
-                          nameWithOwner
-                          name
-                          owner { login }
-                          isPrivate
-                          isFork
-                          description
-                          url
-                        }
-                        contributions {
-                          totalCount
-                        }
-                      }
-                    }
-                  }
-                }
-            "#;
-
-            for year in years_discovered.iter().skip(1).take(max_historical_years) {
-                let from = format!("{year}-01-01T00:00:00Z");
-                let to = format!("{year}-12-31T23:59:59Z");
-                let hist_vars = serde_json::json!({
-                    "login": login,
-                    "from": from,
-                    "to": to,
-                });
-
-                if let Ok(hist_res) = self
-                    .query::<GhGraphQLUserContributions>(historical_query, hist_vars)
-                    .await
-                {
+            match self
+                .query::<GhGraphQLUserContributions>(calendar_query, cal_vars)
+                .await
+            {
+                Ok(cal_res) => {
                     years_queried.push(*year);
-                    if let Some(hist_user) = hist_res.user {
-                        for item in hist_user
-                            .contributions_collection
-                            .commit_contributions_by_repository
+                    if let Some(cal_user) = cal_res.user {
+                        let coll = cal_user.contributions_collection;
+                        if coll.total_repositories_with_contributed_commits
+                            > coll.commit_contributions_by_repository.len()
                         {
+                            any_repository_truncated = true;
+                        }
+                        for item in coll.commit_contributions_by_repository {
                             let commits = item.contributions.map(|c| c.total_count).unwrap_or(1);
                             let entry = map
                                 .entry(item.repository.name_with_owner.clone())
@@ -356,14 +356,16 @@ impl GitHubGraphQLClient {
                             entry.total_commits += commits;
                         }
                     }
-                } else {
+                }
+                Err(_) => {
                     break;
                 }
             }
         }
 
-        let fully_traversed = years_discovered.is_empty()
-            || years_discovered.iter().all(|y| years_queried.contains(y));
+        let all_years_done = !years_discovered.is_empty()
+            && years_discovered.iter().all(|y| years_queried.contains(y));
+        let fully_traversed = all_years_done && !any_repository_truncated;
 
         Ok(HistoricalContributionsResult {
             contributions: map.into_values().collect(),

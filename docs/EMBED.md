@@ -20,7 +20,7 @@ Content-Type: application/json
 {"target":"Voldigoade","mode":"fast","enrich":true}
 ```
 
-`target` accepts a username, `owner/repo` or a GitHub URL. `mode` defaults to `fast`. Omitted `enrich` is false for FAST and true for DEEP; an explicit value overrides that default. Enriched FAST keeps the FAST commit budget. DEEP requires `SPOOR_HTTP_DEEP_ENABLED=true`. Repository targets skip GitLeak regardless of enrichment.
+`target` accepts a username, `owner/repo` or a GitHub URL. `mode` defaults to `fast`. Omitted `enrich` is false for both FAST and DEEP; an explicit `enrich: true` is required to request GitLeak enrichment. Enriched FAST keeps the FAST commit budget. DEEP requires `SPOOR_HTTP_DEEP_ENABLED=true`. Repository targets skip GitLeak regardless of enrichment.
 
 The creation response includes `id`, `target`, `mode`, `enrich`, `status` and `created_at`. Status is `pending`, `running`, `completed` or `failed`; failed metadata includes `error`. Store the returned ID rather than reconstructing it from the target.
 

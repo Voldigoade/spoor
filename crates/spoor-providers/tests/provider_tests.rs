@@ -1211,3 +1211,342 @@ async fn test_commit_search_bisection_on_oversized_window() {
         .iter()
         .any(|id| id.email == "charlie@split.org"));
 }
+
+#[tokio::test]
+async fn test_author_budget_exhaustion_does_not_starve_committer() {
+    let gh_mock = MockServer::start().await;
+    let gl_mock = MockServer::start().await;
+
+    let user_json = r#"{
+        "login": "dave",
+        "id": 8888,
+        "avatar_url": "https://avatars.githubusercontent.com/u/8888",
+        "html_url": "https://github.com/dave",
+        "name": "Dave Tester",
+        "company": null,
+        "blog": "",
+        "location": null,
+        "email": null,
+        "bio": null,
+        "twitter_username": null,
+        "public_repos": 0,
+        "public_gists": 0,
+        "followers": 1,
+        "following": 1,
+        "created_at": "2020-01-01T00:00:00Z",
+        "updated_at": "2024-01-01T00:00:00Z"
+    }"#;
+
+    Mock::given(method("GET"))
+        .and(path("/users/dave"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(user_json))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/dave/repos"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/dave/gpg_keys"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/dave/keys"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/dave/events/public"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/dave/starred"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+
+    let gql_empty = r#"{
+        "data": {
+            "user": {
+                "contributionsCollection": {
+                    "contributionYears": [],
+                    "totalCommitContributions": 0,
+                    "contributionCalendar": { "totalContributions": 0 },
+                    "commitContributionsByRepository": []
+                }
+            }
+        }
+    }"#;
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(gql_empty))
+        .mount(&gh_mock)
+        .await;
+
+    struct AuthorMatcher;
+    impl wiremock::Match for AuthorMatcher {
+        fn matches(&self, request: &wiremock::Request) -> bool {
+            let q = request.url.query().unwrap_or("");
+            q.contains("author%3Adave")
+        }
+    }
+
+    // Author queries return oversized count > 300 to continuously trigger bisection and exhaust author budget
+    let author_oversized_json = r#"{
+        "total_count": 999,
+        "incomplete_results": false,
+        "items": []
+    }"#;
+
+    Mock::given(method("GET"))
+        .and(path("/search/commits"))
+        .and(AuthorMatcher)
+        .respond_with(ResponseTemplate::new(200).set_body_string(author_oversized_json))
+        .mount(&gh_mock)
+        .await;
+
+    struct CommitterMatcher;
+    impl wiremock::Match for CommitterMatcher {
+        fn matches(&self, request: &wiremock::Request) -> bool {
+            let q = request.url.query().unwrap_or("");
+            q.contains("committer%3Adave")
+        }
+    }
+
+    let committer_match_json = r#"{
+        "total_count": 1,
+        "incomplete_results": false,
+        "items": [
+            {
+                "sha": "committer999",
+                "html_url": "https://github.com/external/committer-repo/commit/committer999",
+                "commit": {
+                    "author": { "name": "Alice", "email": "alice@corp.org", "date": "2024-03-01T10:00:00Z" },
+                    "committer": { "name": "Dave", "email": "dave@committer.org", "date": "2024-03-01T10:00:00Z" },
+                    "message": "merge: committer patch"
+                },
+                "author": { "login": "alice", "id": 1111 },
+                "committer": { "login": "dave", "id": 8888 },
+                "repository": { "id": 999, "name": "committer-repo", "full_name": "external/committer-repo", "html_url": "https://github.com/external/committer-repo", "fork": false }
+            }
+        ]
+    }"#;
+
+    Mock::given(method("GET"))
+        .and(path("/search/commits"))
+        .and(CommitterMatcher)
+        .respond_with(ResponseTemplate::new(200).set_body_string(committer_match_json))
+        .mount(&gh_mock)
+        .await;
+
+    let http = HttpClient::new();
+    let gh_provider = GitHubProvider::new(
+        http.clone(),
+        Some("test_tok".to_string()),
+        Some(gh_mock.uri()),
+        Some(format!("{}/graphql", gh_mock.uri())),
+    );
+    let gl_client = GitLeakClient::new(http, Some(gl_mock.uri()));
+    let cache = Arc::new(NoopCacheStore);
+    let engine = AnalysisEngine::new(gh_provider, gl_client, cache);
+    let target = Target::parse("dave").unwrap();
+
+    let report = engine
+        .run_analysis(&target, AnalysisOptions::deep(), None)
+        .await
+        .unwrap();
+
+    assert!(report.coverage.discovery.is_some());
+    let disc = report.coverage.discovery.as_ref().unwrap();
+
+    // Verify committer search executed and found commits despite author budget exhaustion
+    assert_eq!(disc.global_committer_commits_found, 1);
+    assert!(report
+        .identities
+        .iter()
+        .any(|id| id.email == "dave@committer.org"));
+}
+
+#[tokio::test]
+async fn test_graphql_calendar_year_accounting_and_deduplication() {
+    let gh_mock = MockServer::start().await;
+
+    struct GqlYearsMatcher;
+    impl wiremock::Match for GqlYearsMatcher {
+        fn matches(&self, request: &wiremock::Request) -> bool {
+            let body = String::from_utf8_lossy(&request.body);
+            body.contains("contributionYears") && !body.contains("$from")
+        }
+    }
+
+    let years_resp = r#"{
+        "data": {
+            "user": {
+                "contributionsCollection": {
+                    "contributionYears": [2024, 2023]
+                }
+            }
+        }
+    }"#;
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(GqlYearsMatcher)
+        .respond_with(ResponseTemplate::new(200).set_body_string(years_resp))
+        .mount(&gh_mock)
+        .await;
+
+    struct GqlYear2024Matcher;
+    impl wiremock::Match for GqlYear2024Matcher {
+        fn matches(&self, request: &wiremock::Request) -> bool {
+            let body = String::from_utf8_lossy(&request.body);
+            body.contains("2024-01-01T00:00:00Z")
+        }
+    }
+
+    let year_2024_resp = r#"{
+        "data": {
+            "user": {
+                "contributionsCollection": {
+                    "totalRepositoriesWithContributedCommits": 2,
+                    "commitContributionsByRepository": [
+                        {
+                            "repository": {
+                                "nameWithOwner": "alice/shared-repo",
+                                "name": "shared-repo",
+                                "owner": { "login": "alice" },
+                                "isPrivate": false,
+                                "isFork": false,
+                                "description": null,
+                                "url": "https://github.com/alice/shared-repo"
+                            },
+                            "contributions": { "totalCount": 60 }
+                        },
+                        {
+                            "repository": {
+                                "nameWithOwner": "alice/new-repo",
+                                "name": "new-repo",
+                                "owner": { "login": "alice" },
+                                "isPrivate": false,
+                                "isFork": false,
+                                "description": null,
+                                "url": "https://github.com/alice/new-repo"
+                            },
+                            "contributions": { "totalCount": 15 }
+                        }
+                    ]
+                }
+            }
+        }
+    }"#;
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(GqlYear2024Matcher)
+        .respond_with(ResponseTemplate::new(200).set_body_string(year_2024_resp))
+        .mount(&gh_mock)
+        .await;
+
+    struct GqlYear2023Matcher;
+    impl wiremock::Match for GqlYear2023Matcher {
+        fn matches(&self, request: &wiremock::Request) -> bool {
+            let body = String::from_utf8_lossy(&request.body);
+            body.contains("2023-01-01T00:00:00Z")
+        }
+    }
+
+    let year_2023_resp = r#"{
+        "data": {
+            "user": {
+                "contributionsCollection": {
+                    "totalRepositoriesWithContributedCommits": 2,
+                    "commitContributionsByRepository": [
+                        {
+                            "repository": {
+                                "nameWithOwner": "alice/shared-repo",
+                                "name": "shared-repo",
+                                "owner": { "login": "alice" },
+                                "isPrivate": false,
+                                "isFork": false,
+                                "description": null,
+                                "url": "https://github.com/alice/shared-repo"
+                            },
+                            "contributions": { "totalCount": 40 }
+                        },
+                        {
+                            "repository": {
+                                "nameWithOwner": "alice/old-repo",
+                                "name": "old-repo",
+                                "owner": { "login": "alice" },
+                                "isPrivate": false,
+                                "isFork": false,
+                                "description": null,
+                                "url": "https://github.com/alice/old-repo"
+                            },
+                            "contributions": { "totalCount": 25 }
+                        }
+                    ]
+                }
+            }
+        }
+    }"#;
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(GqlYear2023Matcher)
+        .respond_with(ResponseTemplate::new(200).set_body_string(year_2023_resp))
+        .mount(&gh_mock)
+        .await;
+
+    let http = HttpClient::new();
+    let gh_provider = GitHubProvider::new(
+        http.clone(),
+        Some("mock_token".to_string()),
+        None,
+        Some(format!("{}/graphql", gh_mock.uri())),
+    );
+
+    let res = gh_provider
+        .fetch_user_contributions_historical("alice", 5)
+        .await
+        .unwrap();
+
+    assert_eq!(res.years_discovered, vec![2024, 2023]);
+    assert_eq!(res.years_queried, vec![2024, 2023]);
+    assert!(res.fully_traversed);
+
+    let shared = res
+        .contributions
+        .iter()
+        .find(|c| c.repository.name_with_owner == "alice/shared-repo")
+        .expect("shared-repo should be present");
+    assert!(shared.years.contains(&2024));
+    assert!(shared.years.contains(&2023));
+    // Exact sum without double-counting: 60 (2024) + 40 (2023) = 100
+    assert_eq!(shared.total_commits, 100);
+
+    let new_repo = res
+        .contributions
+        .iter()
+        .find(|c| c.repository.name_with_owner == "alice/new-repo")
+        .expect("new-repo should be present");
+    assert_eq!(new_repo.years, vec![2024]);
+    assert_eq!(new_repo.total_commits, 15);
+
+    let old_repo = res
+        .contributions
+        .iter()
+        .find(|c| c.repository.name_with_owner == "alice/old-repo")
+        .expect("old-repo should be present");
+    assert_eq!(old_repo.years, vec![2023]);
+    assert_eq!(old_repo.total_commits, 25);
+}

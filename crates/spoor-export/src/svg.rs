@@ -168,17 +168,17 @@ pub fn export_svg(report: &Report) -> Result<String, SpoorError> {
 
     <!-- Top Technical Header -->
     <g transform="translate(40, 48)">
-        <text class="mono" x="0" y="0" fill="#0284c7" font-size="13" font-weight="700" letter-spacing="1.5">SPOOR AUDIT REPORT // v0.2.0</text>
-        <text class="mono" x="320" y="0" fill="#94a3b8" font-size="11">PUBLIC FOOTPRINT TELEMETRY</text>
-        <rect x="760" y="-12" width="120" height="20" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1" />
+        <text class="mono" x="0" y="0" fill="#0f172a" font-size="13" font-weight="700" letter-spacing="1.0">spoor audit ledger</text>
+        <text class="mono" x="200" y="0" fill="#64748b" font-size="11">public github metadata &amp; cryptographic keys</text>
+        <rect x="760" y="-12" width="120" height="20" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1" />
         <text class="mono" x="820" y="2" fill="#0f172a" font-size="10" font-weight="600" text-anchor="middle">MODE: {mode}</text>
     </g>
     <line x1="40" y1="62" x2="920" y2="62" stroke="#e2e8f0" stroke-width="1" />
 
     <!-- Target Metadata Strip -->
     <g transform="translate(40, 84)">
-        <text class="mono" x="0" y="0" fill="#0f172a" font-size="16" font-weight="700">TARGET: {target_display} [{target_type}]</text>
-        <text class="mono" x="0" y="18" fill="#64748b" font-size="10">NAME: {display_name} | URL: {canonical_url} | TIMESTAMP: {generated}</text>
+        <text class="mono" x="0" y="0" fill="#0f172a" font-size="15" font-weight="700">target: {target_display} [{target_type}]</text>
+        <text class="mono" x="0" y="18" fill="#64748b" font-size="10">display: {display_name} | url: {canonical_url} | generated: {generated}</text>
     </g>
 
     <!-- Metrics Matrix Grid (5 blocks) -->
@@ -205,8 +205,8 @@ pub fn export_svg(report: &Report) -> Result<String, SpoorError> {
     </g>
 
     <!-- Mid Section Titles -->
-    <text class="mono" x="40" y="210" fill="#0284c7" font-size="10" font-weight="700">// 01. OBSERVABLE IDENTITIES (SAMPLE)</text>
-    <text class="mono" x="495" y="210" fill="#0284c7" font-size="10" font-weight="700">// 02. REPOSITORIES &amp; COVERAGE RECORD</text>
+    <text class="mono" x="40" y="210" fill="#334155" font-size="11" font-weight="700">OBSERVED IDENTITIES</text>
+    <text class="mono" x="495" y="210" fill="#334155" font-size="11" font-weight="700">REPOSITORIES &amp; COVERAGE</text>
 
     <!-- Coverage Sub-Bar in Right Column -->
     <g transform="translate(495, 222)">
@@ -219,13 +219,13 @@ pub fn export_svg(report: &Report) -> Result<String, SpoorError> {
     {id_rows}
     {repo_rows}
 
-    <!-- Telemetry Title -->
-    <text class="mono" x="40" y="460" fill="#0284c7" font-size="10" font-weight="700">// 03. UPSTREAM PROVIDER TELEMETRY</text>
+    <!-- Provider Diagnostics Title -->
+    <text class="mono" x="40" y="460" fill="#334155" font-size="11" font-weight="700">PROVIDER HEALTH &amp; DIAGNOSTICS</text>
     {status_badges}
 
     <!-- Footer -->
     <line x1="40" y1="510" x2="920" y2="510" stroke="#e2e8f0" stroke-width="1" />
-    <text class="mono" x="40" y="525" fill="#94a3b8" font-size="9">PROVENANCE: Public Git commit headers &amp; GitHub public API endpoints // SOURCED FACTS ONLY</text>
+    <text class="mono" x="40" y="525" fill="#94a3b8" font-size="9">PROVENANCE: Public Git commit headers &amp; GitHub public API endpoints</text>
     <text class="mono" x="920" y="525" fill="#94a3b8" font-size="9" text-anchor="end">ENGINE: Spoor by Voldigoade</text>
 </svg>"##
     );

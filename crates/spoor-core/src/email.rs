@@ -45,19 +45,16 @@ pub fn classify_email(email: &str, profile_public_email: Option<&str>) -> EmailT
         return EmailType::Unknown;
     }
 
-    // 1. Check for GitHub platform service and automated bot identities
     if is_github_platform_system(&trimmed) {
         return EmailType::GitHubSystem;
     }
 
-    // 2. Profile public email match
     if let Some(pub_email) = profile_public_email {
         if trimmed == pub_email.trim().to_lowercase() {
             return EmailType::PublicProfile;
         }
     }
 
-    // 3. User privacy noreply addresses
     if trimmed.ends_with("@users.noreply.github.com") {
         let local_part = trimmed.split('@').next().unwrap_or("");
         if local_part.contains('+') {
@@ -81,7 +78,6 @@ pub fn classify_email(email: &str, profile_public_email: Option<&str>) -> EmailT
         return EmailType::LegacyGitHubNoReply;
     }
 
-    // 4. Standard domain emails
     if let Some((_user, domain)) = trimmed.split_once('@') {
         if domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.') {
             return EmailType::DomainEmail;

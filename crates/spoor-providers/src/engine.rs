@@ -135,7 +135,6 @@ impl AnalysisEngine {
         )
         .await;
 
-        // Check full report cache (key differentiates analysis depth and enrichment)
         let cache_key = format!(
             "report:{}:{}:enrich={}",
             target.display_name(),
@@ -159,7 +158,6 @@ impl AnalysisEngine {
                     },
                 )
                 .await;
-                // Mark provider statuses as cached where appropriate
                 for status in cached_report.provider_status.values_mut() {
                     if status.status == ProviderHealth::Ok {
                         status.status = ProviderHealth::Cached;
@@ -177,7 +175,6 @@ impl AnalysisEngine {
             }
         };
 
-        // Cache completed report (FAST for 1 hour, DEEP for 6 hours)
         let ttl_secs = match options.mode {
             AnalysisMode::Fast => 3600,
             AnalysisMode::Deep => 21600,
@@ -214,18 +211,19 @@ impl AnalysisEngine {
         let mut stopped_due_to_budget = false;
         let mut first_error: Option<SpoorError> = None;
 
-        let max_requests = match mode {
-            AnalysisMode::Fast => 2,
-            AnalysisMode::Deep => 14,
+        let (author_max_requests, committer_max_requests) = match mode {
+            AnalysisMode::Fast => (1, 1),
+            AnalysisMode::Deep => (7, 7),
         };
-        let mut requests_used = 0usize;
+        let mut author_requests_used = 0usize;
+        let mut committer_requests_used = 0usize;
 
         let start_date = created_at.date_naive();
         let end_date = Utc::now().date_naive();
 
         if mode == AnalysisMode::Fast {
-            if requests_used < max_requests {
-                requests_used += 1;
+            if author_requests_used < author_max_requests {
+                author_requests_used += 1;
                 let query = format!("author:{username}");
                 match self
                     .github
@@ -267,7 +265,7 @@ impl AnalysisEngine {
             queue.push_back((start_date, end_date));
 
             while let Some((w_start, w_end)) = queue.pop_front() {
-                if requests_used >= max_requests {
+                if author_requests_used >= author_max_requests {
                     windows_partial += 1 + queue.len();
                     stopped_due_to_budget = true;
                     queue.clear();
@@ -281,7 +279,7 @@ impl AnalysisEngine {
                     format!("author:{username} author-date:{w_start}..{w_end}")
                 };
 
-                requests_used += 1;
+                author_requests_used += 1;
                 match self
                     .github
                     .search_commits(&query, 1, 100, Some("author-date"))
@@ -305,16 +303,18 @@ impl AnalysisEngine {
 
                         if res.total_count <= 100 {
                             windows_complete += 1;
-                        } else if res.total_count <= 300 && requests_used < max_requests {
+                        } else if res.total_count <= 300
+                            && author_requests_used < author_max_requests
+                        {
                             let total_pages = (res.total_count as usize).div_ceil(100);
                             let mut paginated_fully = true;
                             for p in 2..=total_pages {
-                                if requests_used >= max_requests {
+                                if author_requests_used >= author_max_requests {
                                     paginated_fully = false;
                                     stopped_due_to_budget = true;
                                     break;
                                 }
-                                requests_used += 1;
+                                author_requests_used += 1;
                                 match self
                                     .github
                                     .search_commits(&query, p, 100, Some("author-date"))
@@ -376,7 +376,8 @@ impl AnalysisEngine {
         }
 
         if mode == AnalysisMode::Fast {
-            if requests_used < max_requests {
+            if committer_requests_used < committer_max_requests {
+                committer_requests_used += 1;
                 let query = format!("committer:{username}");
                 match self
                     .github
@@ -420,7 +421,7 @@ impl AnalysisEngine {
             queue.push_back((start_date, end_date));
 
             while let Some((w_start, w_end)) = queue.pop_front() {
-                if requests_used >= max_requests {
+                if committer_requests_used >= committer_max_requests {
                     windows_partial += 1 + queue.len();
                     stopped_due_to_budget = true;
                     queue.clear();
@@ -434,7 +435,7 @@ impl AnalysisEngine {
                     format!("committer:{username} committer-date:{w_start}..{w_end}")
                 };
 
-                requests_used += 1;
+                committer_requests_used += 1;
                 match self
                     .github
                     .search_commits(&query, 1, 100, Some("committer-date"))
@@ -460,16 +461,18 @@ impl AnalysisEngine {
 
                         if res.total_count <= 100 {
                             windows_complete += 1;
-                        } else if res.total_count <= 300 && requests_used < max_requests {
+                        } else if res.total_count <= 300
+                            && committer_requests_used < committer_max_requests
+                        {
                             let total_pages = (res.total_count as usize).div_ceil(100);
                             let mut paginated_fully = true;
                             for p in 2..=total_pages {
-                                if requests_used >= max_requests {
+                                if committer_requests_used >= committer_max_requests {
                                     paginated_fully = false;
                                     stopped_due_to_budget = true;
                                     break;
                                 }
-                                requests_used += 1;
+                                committer_requests_used += 1;
                                 match self
                                     .github
                                     .search_commits(&query, p, 100, Some("committer-date"))
@@ -537,6 +540,7 @@ impl AnalysisEngine {
             }
         }
 
+        let _ = (author_requests_used, committer_requests_used);
         let total_commits = map.len();
         let (health, error_message) = if let Some(err) = first_error {
             let msg = err.to_string();
