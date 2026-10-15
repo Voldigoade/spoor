@@ -14,9 +14,10 @@ pub use error::SpoorError;
 pub use events::SpoorEvent;
 pub use provenance::Provenance;
 pub use report::{
-    ActivityEventSummary, ActivityReport, CoverageRecord, GeneratorInfo, IdentityRecord,
-    InferenceRecord, KeyRecord, KeyType, ProfileReport, ProviderHealth, ProviderStatus,
-    RepoHygiene, RepoReport, Report, ReportSummary, SCHEMA_VERSION,
+    ActivityEventSummary, ActivityReport, CommitMatchRole, CoverageRecord, DiscoveryCoverage,
+    GeneratorInfo, IdentityRecord, InferenceRecord, KeyRecord, KeyType, ProfileReport,
+    ProviderHealth, ProviderStatus, RepoHygiene, RepoReport, Report, ReportSummary,
+    SCHEMA_VERSION,
 };
 pub use target::{AnalysisMode, AnalysisOptions, Target};
 

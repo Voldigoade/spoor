@@ -188,12 +188,23 @@ impl GitHubRestClient {
         query: &str,
         page: usize,
         per_page: usize,
+        sort: Option<&str>,
     ) -> Result<GhCommitSearchResult, SpoorError> {
         let per_page = per_page.clamp(1, 100);
         let encoded_query =
             url::form_urlencoded::byte_serialize(query.as_bytes()).collect::<String>();
+        let sort_param = match sort {
+            Some(s) => format!("&sort={s}&order=desc"),
+            None => {
+                if query.contains("committer:") {
+                    "&sort=committer-date&order=desc".to_string()
+                } else {
+                    "&sort=author-date&order=desc".to_string()
+                }
+            }
+        };
         let url = format!(
-            "{}/search/commits?q={encoded_query}&page={page}&per_page={per_page}&sort=committer-date&order=desc",
+            "{}/search/commits?q={encoded_query}&page={page}&per_page={per_page}{sort_param}",
             self.base_url
         );
         let headers = self.headers();

@@ -60,35 +60,78 @@ fn sanitize_pdf_text(s: &str) -> String {
             ')' => out.push_str("\\)"),
             '\\' => out.push_str("\\\\"),
             '\r' | '\n' | '\t' => out.push(' '),
-            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => out.push('\''),
-            '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => out.push('"'),
-            '\u{2013}' | '\u{2014}' | '\u{2015}' | '\u{2212}' => out.push('-'),
-            '\u{2026}' => out.push_str("..."),
-            '\u{2022}' | '\u{00B7}' => out.push('*'),
-            '\u{00C0}'..='\u{00C5}' => out.push('A'),
-            '\u{00E0}'..='\u{00E5}' => out.push('a'),
-            '\u{00C8}'..='\u{00CB}' => out.push('E'),
-            '\u{00E8}'..='\u{00EB}' => out.push('e'),
-            '\u{00CC}'..='\u{00CF}' => out.push('I'),
-            '\u{00EC}'..='\u{00EF}' => out.push('i'),
-            '\u{00D2}'..='\u{00D6}' => out.push('O'),
-            '\u{00F2}'..='\u{00F6}' => out.push('o'),
-            '\u{00D9}'..='\u{00DC}' => out.push('U'),
-            '\u{00F9}'..='\u{00FC}' => out.push('u'),
-            '\u{00C7}' => out.push('C'),
-            '\u{00E7}' => out.push('c'),
-            '\u{00D1}' => out.push('N'),
-            '\u{00F1}' => out.push('n'),
-            '\u{00DF}' => out.push_str("ss"),
-            '\u{00D8}' => out.push('O'),
-            '\u{00F8}' => out.push('o'),
-            '\u{00C6}' => out.push_str("AE"),
-            '\u{00E6}' => out.push_str("ae"),
             c if c.is_ascii() && !c.is_ascii_control() => out.push(c),
+            // WinAnsi / ISO-8859-1 accented characters (0xA0..=0xFF) encoded via exact octal escapes
+            c if (c as u32) >= 0x00A0 && (c as u32) <= 0x00FF => {
+                let byte = c as u8;
+                out.push_str(&format!("\\{:03o}", byte));
+            }
+            // Typographical punctuation in Windows-1252
+            '\u{2018}' => out.push_str("\\221"),
+            '\u{2019}' => out.push_str("\\222"),
+            '\u{201C}' => out.push_str("\\223"),
+            '\u{201D}' => out.push_str("\\224"),
+            '\u{2022}' => out.push_str("\\225"),
+            '\u{2013}' => out.push_str("\\226"),
+            '\u{2014}' => out.push_str("\\227"),
+            '\u{2026}' => out.push_str("\\205"),
+            '\u{20AC}' => out.push_str("\\200"),
+            '\u{0152}' => out.push_str("\\214"),
+            '\u{0153}' => out.push_str("\\234"),
+            '\u{0160}' => out.push_str("\\212"),
+            '\u{0161}' => out.push_str("\\232"),
+            '\u{0178}' => out.push_str("\\237"),
+            '\u{017D}' => out.push_str("\\216"),
+            '\u{017E}' => out.push_str("\\236"),
             _ => out.push(' '),
         }
     }
     out
+}
+
+fn wrap_text(s: &str, max_chars: usize) -> Vec<String> {
+    if s.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for word in s.split_whitespace() {
+        if current.is_empty() {
+            if word.len() > max_chars {
+                let mut remaining = word;
+                while remaining.len() > max_chars {
+                    let (head, tail) = remaining.split_at(max_chars);
+                    lines.push(head.to_string());
+                    remaining = tail;
+                }
+                current.push_str(remaining);
+            } else {
+                current.push_str(word);
+            }
+        } else if current.len() + 1 + word.len() <= max_chars {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            lines.push(current);
+            current = String::new();
+            if word.len() > max_chars {
+                let mut remaining = word;
+                while remaining.len() > max_chars {
+                    let (head, tail) = remaining.split_at(max_chars);
+                    lines.push(head.to_string());
+                    remaining = tail;
+                }
+                current.push_str(remaining);
+            } else {
+                current.push_str(word);
+            }
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
 }
 
 struct PdfLayoutEngine {
@@ -234,13 +277,21 @@ impl PdfLayoutEngine {
         let mut current_x = self.left_margin + 5.0;
         for (val, width, is_bold) in cols {
             let font = if *is_bold { "/F2" } else { "/F1" };
+            let max_chars = (*width / 5.0) as usize;
+            let fitted_val = if val.chars().count() > max_chars && max_chars > 3 {
+                let truncated: String = val.chars().take(max_chars - 1).collect();
+                format!("{truncated}...")
+            } else {
+                val.to_string()
+            };
+
             p.extend_from_slice(
                 format!(
                     "BT {} 8 Tf 0.15 0.15 0.15 rg {} {} Td ({}) Tj ET\n",
                     font,
                     current_x,
                     row_y,
-                    sanitize_pdf_text(val)
+                    sanitize_pdf_text(&fitted_val)
                 )
                 .as_bytes(),
             );
@@ -251,6 +302,10 @@ impl PdfLayoutEngine {
     }
 
     fn add_key_value(&mut self, key: &str, val: &str) {
+        let max_val_chars = 65;
+        let val_lines = wrap_text(val, max_val_chars);
+        let first_val = val_lines.first().map(|s| s.as_str()).unwrap_or("");
+
         self.ensure_space(14.0);
         let p = &mut self.current;
         let row_y = self.y - 11.0;
@@ -264,12 +319,28 @@ impl PdfLayoutEngine {
                 sanitize_pdf_text(key),
                 self.left_margin + 170.0,
                 row_y,
-                sanitize_pdf_text(val)
+                sanitize_pdf_text(first_val)
             )
             .as_bytes(),
         );
 
         self.y -= 14.0;
+
+        for line in val_lines.iter().skip(1) {
+            self.ensure_space(12.0);
+            let p = &mut self.current;
+            let sub_y = self.y - 10.0;
+            p.extend_from_slice(
+                format!(
+                    "BT /F1 9 Tf 0.1 0.1 0.1 rg {} {} Td ({}) Tj ET\n",
+                    self.left_margin + 170.0,
+                    sub_y,
+                    sanitize_pdf_text(line)
+                )
+                .as_bytes(),
+            );
+            self.y -= 12.0;
+        }
     }
 
     fn add_card_target(
@@ -569,18 +640,22 @@ pub fn export_pdf(report: &Report) -> Result<Vec<u8>, SpoorError> {
     if !report.limitations.is_empty() {
         engine.add_section_header("8. INHERENT LIMITATIONS");
         for lim in &report.limitations {
-            engine.ensure_space(13.0);
-            let p = &mut engine.current;
-            let row_y = engine.y - 10.0;
-            p.extend_from_slice(
-                format!(
-                    "BT /F1 7.5 Tf 0.35 0.40 0.45 rg 45 {} Td (* {}) Tj ET\n",
-                    row_y,
-                    sanitize_pdf_text(lim)
-                )
-                .as_bytes(),
-            );
-            engine.y -= 12.0;
+            let bullet = format!("* {lim}");
+            let lines = wrap_text(&bullet, 110);
+            for line in lines {
+                engine.ensure_space(13.0);
+                let p = &mut engine.current;
+                let row_y = engine.y - 10.0;
+                p.extend_from_slice(
+                    format!(
+                        "BT /F1 7.5 Tf 0.35 0.40 0.45 rg 45 {} Td ({}) Tj ET\n",
+                        row_y,
+                        sanitize_pdf_text(&line)
+                    )
+                    .as_bytes(),
+                );
+                engine.y -= 12.0;
+            }
         }
     }
 
@@ -604,9 +679,16 @@ pub fn export_pdf(report: &Report) -> Result<Vec<u8>, SpoorError> {
     );
     pdf.add_object(pages_dict.into_bytes());
 
-    pdf.add_object(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec());
-    pdf.add_object(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>".to_vec());
-    pdf.add_object(b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>".to_vec());
+    pdf.add_object(
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_vec(),
+    );
+    pdf.add_object(
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>"
+            .to_vec(),
+    );
+    pdf.add_object(
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>".to_vec(),
+    );
 
     for (i, page_data) in pages_raw.into_iter().enumerate() {
         let content_obj_id = first_page_obj + (i * 2) + 1;
@@ -687,5 +769,48 @@ mod tests {
         let pdf_str = String::from_utf8_lossy(&bytes);
         assert!(pdf_str.contains("/Count "));
         assert!(!pdf_str.contains("/Count 1 "));
+    }
+
+    #[test]
+    fn test_pdf_preserves_accents_and_winansi_encoding() {
+        let mut report = Report::new(
+            Target::User {
+                username: "voldigoade".into(),
+            },
+            AnalysisMode::Fast,
+        );
+        report.summary.display_name = "José-François Müller".into();
+        report.identities.push(spoor_core::IdentityRecord {
+            name: Some("Théodore Günther".into()),
+            email: "contact@école-polytechnique.fr".into(),
+            email_type: spoor_core::EmailType::DomainEmail,
+            first_seen: None,
+            last_seen: None,
+            commits_observed: 10,
+            repositories: vec!["repo".into()],
+            sources: vec!["Git".into()],
+            is_verified_signer: true,
+        });
+
+        let bytes = export_pdf(&report).unwrap();
+        let pdf_str = String::from_utf8_lossy(&bytes);
+        assert!(pdf_str.contains("/Encoding /WinAnsiEncoding"));
+
+        let sanitized = sanitize_pdf_text("José-François Müller");
+        assert_eq!(sanitized, "Jos\\351-Fran\\347ois M\\374ller");
+        assert!(!sanitized.contains("Jose-Francois Muller"));
+
+        let sanitized_email = sanitize_pdf_text("contact@école-polytechnique.fr");
+        assert!(sanitized_email.contains("\\351cole"));
+    }
+
+    #[test]
+    fn test_wrap_text_splits_long_lines() {
+        let text = "This is a very long sentence designed to verify that the PDF export engine correctly wraps text onto multiple lines instead of clipping horizontally or overflowing bounding boxes.";
+        let lines = wrap_text(text, 40);
+        assert!(lines.len() >= 4);
+        for line in &lines {
+            assert!(line.len() <= 40);
+        }
     }
 }

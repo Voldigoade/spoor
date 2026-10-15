@@ -154,7 +154,7 @@ impl GitInspector {
 
         debug!(owner = %owner, repo = %repo, "Initiating safe bare clone for history inspection");
 
-        let clone_cmd = tokio::process::Command::new("git")
+        let mut child = tokio::process::Command::new("git")
             .arg("-c")
             .arg("core.hooksPath=/dev/null")
             .arg("-c")
@@ -162,46 +162,74 @@ impl GitInspector {
             .arg("clone")
             .arg("--bare")
             .arg("--filter=blob:none")
-            .arg("--depth=500")
             .arg(&clone_url)
             .arg(repo_dir)
-            .output();
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| SpoorError::ProviderError {
+                provider: "git".to_string(),
+                message: format!("Failed to spawn git clone: {e}"),
+            })?;
 
-        let clone_output = match tokio::time::timeout(self.timeout_duration, clone_cmd).await {
-            Ok(Ok(output)) => output,
-            Ok(Err(e)) => {
-                return Err(SpoorError::ProviderError {
-                    provider: "git".to_string(),
-                    message: format!("Failed to execute git clone: {e}"),
-                });
+        let stderr = child.stderr.take();
+        let stderr_handle = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut r) = stderr {
+                use tokio::io::AsyncReadExt;
+                let _ = r.read_to_end(&mut buf).await;
             }
+            buf
+        });
+
+        let max_budget = self.max_bytes_budget;
+        let monitor_future = async {
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let size = Self::calculate_dir_size(repo_dir);
+                        if size > max_budget {
+                            let _ = child.kill().await;
+                            return Err(SpoorError::ProviderError {
+                                provider: "git".to_string(),
+                                message: format!(
+                                    "Repository clone exceeded safety byte budget during transfer (used {} MB, limit {} MB)",
+                                    size / (1024 * 1024),
+                                    max_budget / (1024 * 1024)
+                                ),
+                            });
+                        }
+                    }
+                    status = child.wait() => {
+                        let exit_status = status.map_err(|e| SpoorError::ProviderError {
+                            provider: "git".to_string(),
+                            message: format!("Failed to wait for git clone: {e}"),
+                        })?;
+                        let stderr_bytes = stderr_handle.await.unwrap_or_default();
+                        if !exit_status.success() {
+                            let stderr_str = String::from_utf8_lossy(&stderr_bytes);
+                            warn!(owner = %owner, repo = %repo, stderr = %stderr_str, "Git clone exited with error");
+                            return Err(SpoorError::ProviderError {
+                                provider: "git".to_string(),
+                                message: format!("git clone failed: {}", stderr_str.trim()),
+                            });
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        };
+
+        match tokio::time::timeout(self.timeout_duration, monitor_future).await {
+            Ok(res) => res?,
             Err(_) => {
+                let _ = child.kill().await;
                 return Err(SpoorError::Timeout {
                     provider: "git".to_string(),
                     timeout_secs: self.timeout_duration.as_secs(),
                 });
             }
-        };
-
-        if !clone_output.status.success() {
-            let stderr = String::from_utf8_lossy(&clone_output.stderr);
-            warn!(owner = %owner, repo = %repo, stderr = %stderr, "Git clone exited with error");
-            return Err(SpoorError::ProviderError {
-                provider: "git".to_string(),
-                message: format!("git clone failed: {}", stderr.trim()),
-            });
-        }
-
-        let disk_usage = Self::calculate_dir_size(repo_dir);
-        if disk_usage > self.max_bytes_budget {
-            return Err(SpoorError::ProviderError {
-                provider: "git".to_string(),
-                message: format!(
-                    "Repository clone exceeded safety byte budget (used {} MB, limit {} MB)",
-                    disk_usage / (1024 * 1024),
-                    self.max_bytes_budget / (1024 * 1024)
-                ),
-            });
         }
 
         let max_arg = format!("--max-count={max_commits}");
@@ -320,5 +348,17 @@ mod tests {
             p
         };
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_git_inspector_configuration_and_budget() {
+        let inspector = GitInspector::new(5, 1024 * 1024);
+        assert_eq!(inspector.max_bytes_budget, 1024 * 1024);
+        assert_eq!(inspector.timeout_duration, Duration::from_secs(5));
+
+        let res = inspector
+            .inspect_repo_history("invalid..user", "repo", 10)
+            .await;
+        assert!(res.is_err());
     }
 }

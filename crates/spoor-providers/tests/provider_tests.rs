@@ -401,7 +401,7 @@ async fn test_engine_user_deep_flow_with_gitleak_and_repo_hygiene() {
 
     let target = Target::parse("bob").unwrap();
     let report = engine
-        .run_analysis(&target, AnalysisMode::Deep, None)
+        .run_analysis(&target, AnalysisOptions::deep_enriched(), None)
         .await
         .unwrap();
 
@@ -822,4 +822,204 @@ async fn test_gitleak_budget_exhaustion_in_engine() {
         .warnings
         .iter()
         .any(|w| w.contains("GitLeak provider hourly budget exhausted")));
+}
+
+#[tokio::test]
+async fn test_global_commit_search_role_tagging() {
+    let gh_mock = MockServer::start().await;
+    let gl_mock = MockServer::start().await;
+
+    let user_json = r#"{
+        "login": "eve",
+        "id": 9999,
+        "avatar_url": "https://avatars.githubusercontent.com/u/9999",
+        "html_url": "https://github.com/eve",
+        "name": "Eve Engineer",
+        "created_at": "2024-01-01T00:00:00Z",
+        "updated_at": "2024-01-01T00:00:00Z",
+        "public_repos": 0
+    }"#;
+
+    Mock::given(method("GET"))
+        .and(path("/users/eve"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(user_json))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/eve/repos"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/eve/gpg_keys"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/eve/keys"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/eve/events/public"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+
+    let author_search_json = r#"{
+        "total_count": 2,
+        "incomplete_results": false,
+        "items": [
+            {
+                "sha": "aaaa1111",
+                "html_url": "https://github.com/external/repoA/commit/aaaa1111",
+                "commit": {
+                    "author": { "name": "Eve", "email": "eve@author.org", "date": "2024-02-01T10:00:00Z" },
+                    "committer": { "name": "Eve", "email": "eve@author.org", "date": "2024-02-01T10:00:00Z" },
+                    "message": "feat: author commit"
+                },
+                "author": { "login": "eve", "id": 9999 },
+                "committer": null,
+                "repository": { "id": 101, "name": "repoA", "full_name": "external/repoA", "html_url": "https://github.com/external/repoA", "fork": false }
+            },
+            {
+                "sha": "bbbb2222",
+                "html_url": "https://github.com/external/repoB/commit/bbbb2222",
+                "commit": {
+                    "author": { "name": "Eve", "email": "eve@both.org", "date": "2024-03-01T10:00:00Z" },
+                    "committer": { "name": "Eve", "email": "eve@both.org", "date": "2024-03-01T10:00:00Z" },
+                    "message": "fix: both commit"
+                },
+                "author": { "login": "eve", "id": 9999 },
+                "committer": { "login": "eve", "id": 9999 },
+                "repository": { "id": 102, "name": "repoB", "full_name": "external/repoB", "html_url": "https://github.com/external/repoB", "fork": false }
+            }
+        ]
+    }"#;
+
+    let committer_search_json = r#"{
+        "total_count": 2,
+        "incomplete_results": false,
+        "items": [
+            {
+                "sha": "bbbb2222",
+                "html_url": "https://github.com/external/repoB/commit/bbbb2222",
+                "commit": {
+                    "author": { "name": "Eve", "email": "eve@both.org", "date": "2024-03-01T10:00:00Z" },
+                    "committer": { "name": "Eve", "email": "eve@both.org", "date": "2024-03-01T10:00:00Z" },
+                    "message": "fix: both commit"
+                },
+                "author": { "login": "eve", "id": 9999 },
+                "committer": { "login": "eve", "id": 9999 },
+                "repository": { "id": 102, "name": "repoB", "full_name": "external/repoB", "html_url": "https://github.com/external/repoB", "fork": false }
+            },
+            {
+                "sha": "cccc3333",
+                "html_url": "https://github.com/external/repoC/commit/cccc3333",
+                "commit": {
+                    "author": { "name": "Alice", "email": "alice@corp.com", "date": "2024-04-01T10:00:00Z" },
+                    "committer": { "name": "Eve", "email": "eve@committer.org", "date": "2024-04-01T10:00:00Z" },
+                    "message": "merge: committer commit"
+                },
+                "author": { "login": "alice", "id": 8888 },
+                "committer": { "login": "eve", "id": 9999 },
+                "repository": { "id": 103, "name": "repoC", "full_name": "external/repoC", "html_url": "https://github.com/external/repoC", "fork": false }
+            }
+        ]
+    }"#;
+
+    use wiremock::matchers::query_param;
+
+    Mock::given(method("GET"))
+        .and(path("/search/commits"))
+        .and(query_param("q", "author:eve"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(author_search_json))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/search/commits"))
+        .and(query_param("q", "committer:eve"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(committer_search_json))
+        .mount(&gh_mock)
+        .await;
+
+    let http = HttpClient::new();
+    let gh_provider = GitHubProvider::new(http.clone(), None, Some(gh_mock.uri()), None);
+    let gl_client = GitLeakClient::new(http, Some(gl_mock.uri()));
+    let cache = Arc::new(NoopCacheStore);
+    let engine = AnalysisEngine::new(gh_provider, gl_client, cache);
+    let target = Target::parse("eve").unwrap();
+
+    let report = engine
+        .run_analysis(&target, AnalysisOptions::fast(), None)
+        .await
+        .unwrap();
+
+    assert!(report.coverage.discovery.is_some());
+    let disc = report.coverage.discovery.as_ref().unwrap();
+    assert_eq!(disc.global_author_commits_found, 2);
+    assert_eq!(disc.global_committer_commits_found, 2);
+
+    assert!(report.identities.iter().any(|id| id.email == "eve@author.org"));
+    assert!(report.identities.iter().any(|id| id.email == "eve@both.org"));
+    assert!(report.identities.iter().any(|id| id.email == "eve@committer.org"));
+}
+
+#[tokio::test]
+async fn test_graphql_historical_years_traversal() {
+    let gh_mock = MockServer::start().await;
+
+    let gql_user_years = r#"{
+        "data": {
+            "user": {
+                "contributionsCollection": {
+                    "contributionYears": [2024, 2023],
+                    "totalCommitContributions": 150,
+                    "contributionCalendar": { "totalContributions": 200 },
+                    "commitContributionsByRepository": [
+                        {
+                            "repository": {
+                                "nameWithOwner": "eve/project-2024",
+                                "name": "project-2024",
+                                "owner": { "login": "eve" },
+                                "isPrivate": false,
+                                "isFork": false,
+                                "description": null,
+                                "url": "https://github.com/eve/project-2024"
+                            },
+                            "contributions": { "totalCount": 100 }
+                        }
+                    ]
+                }
+            }
+        }
+    }"#;
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(gql_user_years))
+        .mount(&gh_mock)
+        .await;
+
+    let http = HttpClient::new();
+    let gh_provider = GitHubProvider::new(
+        http.clone(),
+        Some("mock_token".to_string()),
+        None,
+        Some(format!("{}/graphql", gh_mock.uri())),
+    );
+    let res = gh_provider
+        .fetch_user_contributions_historical("eve", 5)
+        .await
+        .unwrap();
+
+    assert_eq!(res.years_queried, vec![2024, 2023]);
+    assert_eq!(res.years_discovered, vec![2024, 2023]);
+    assert!(res.fully_traversed);
+    assert!(!res.contributions.is_empty());
 }

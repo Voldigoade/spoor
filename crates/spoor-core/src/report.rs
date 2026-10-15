@@ -226,6 +226,47 @@ pub struct ProviderStatus {
     pub message: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommitMatchRole {
+    Author,
+    Committer,
+    Both,
+}
+
+impl std::fmt::Display for CommitMatchRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CommitMatchRole::Author => write!(f, "Author"),
+            CommitMatchRole::Committer => write!(f, "Committer"),
+            CommitMatchRole::Both => write!(f, "Author & Committer"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DiscoveryCoverage {
+    pub owned_repositories_discovered: usize,
+    pub external_repositories_discovered: usize,
+    pub candidates_selected: usize,
+    pub owned_selected: usize,
+    pub external_selected: usize,
+    pub candidates_skipped: usize,
+    pub repository_scans_attempted: usize,
+    pub repository_scans_succeeded: usize,
+    pub repository_scans_failed: usize,
+    pub global_author_commits_found: usize,
+    pub global_committer_commits_found: usize,
+    pub commit_search_windows_complete: usize,
+    pub commit_search_windows_partial: usize,
+    pub git_history_attempted: usize,
+    pub git_history_succeeded: usize,
+    pub git_history_failed: usize,
+    pub git_history_timed_out: usize,
+    pub graphql_years_fully_traversed: bool,
+    pub stopped_due_to_budget: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CoverageRecord {
     pub commits_scanned: usize,
@@ -240,6 +281,8 @@ pub struct CoverageRecord {
     pub is_partial: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<DiscoveryCoverage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

@@ -61,20 +61,29 @@ impl AnalysisOptions {
     pub fn deep() -> Self {
         Self {
             mode: AnalysisMode::Deep,
+            enrich: false,
+        }
+    }
+
+    pub fn deep_enriched() -> Self {
+        Self {
+            mode: AnalysisMode::Deep,
             enrich: true,
         }
     }
 
     pub fn new(mode: AnalysisMode, enrich: Option<bool>) -> Self {
-        let enrich = enrich.unwrap_or(mode == AnalysisMode::Deep);
+        let enrich = enrich.unwrap_or(false);
         Self { mode, enrich }
     }
 }
 
 impl From<AnalysisMode> for AnalysisOptions {
     fn from(mode: AnalysisMode) -> Self {
-        let enrich = mode == AnalysisMode::Deep;
-        Self { mode, enrich }
+        Self {
+            mode,
+            enrich: false,
+        }
     }
 }
 

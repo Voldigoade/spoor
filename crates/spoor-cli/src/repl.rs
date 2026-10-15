@@ -71,7 +71,7 @@ pub async fn run_repl(engine: Arc<AnalysisEngine>, cache: Arc<dyn CacheStore>) {
                 println!("  * GitHub REST API:    Active");
                 println!("  * GitHub GraphQL:     Active");
                 println!("  * GitHub Auth Token:  {token_status}");
-                println!("  * GitLeak API:        Active (50 req/hr quota, DEEP mode only)\n");
+                println!("  * GitLeak API:        Active (50 req/hr quota, optional enrichment via --enrich)\n");
             }
             "cache" => {
                 let sub = parts.get(1).map(|s| s.to_lowercase());
@@ -112,7 +112,7 @@ pub async fn run_repl(engine: Arc<AnalysisEngine>, cache: Arc<dyn CacheStore>) {
                     } else {
                         AnalysisMode::Fast
                     },
-                    enrich: enrich || deep,
+                    enrich,
                 };
 
                 match Target::parse(target_arg) {

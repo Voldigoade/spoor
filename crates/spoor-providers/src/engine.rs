@@ -1,13 +1,14 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
 use spoor_core::{
     classify_email, ActivityEventSummary, ActivityReport, AnalysisMode, AnalysisOptions,
-    CacheStore, Classification, CoverageRecord, IdentityRecord, InferenceRecord, KeyRecord,
-    KeyType, ProfileReport, Provenance, ProviderHealth, ProviderStatus, RepoHygiene, RepoReport,
-    Report, ReportSummary, SpoorError, SpoorEvent, Target,
+    CacheStore, Classification, CommitMatchRole, CoverageRecord, DiscoveryCoverage,
+    IdentityRecord, InferenceRecord, KeyRecord, KeyType, ProfileReport, Provenance,
+    ProviderHealth, ProviderStatus, RepoHygiene, RepoReport, Report, ReportSummary,
+    SpoorError, SpoorEvent, Target,
 };
 use tokio::sync::mpsc::Sender;
 
@@ -16,7 +17,6 @@ use crate::github::models::{GhCommitActor, GhCommitDetail, GhCommitItem, GhVerif
 use crate::github::GitHubProvider;
 use crate::gitleak::{GitLeakBudget, GitLeakClient, GitLeakOutcome, GitLeakResponse};
 use crate::hygiene::detect_hygiene_from_paths;
-use tracing::debug;
 
 fn extract_repo_from_commit_url(url: &str) -> Option<String> {
     let stripped = url
@@ -36,7 +36,6 @@ fn extract_repo_from_commit_url(url: &str) -> Option<String> {
 
 type ScannedRepoMeta = (Option<HashMap<String, u64>>, Option<RepoHygiene>);
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct CandidateRepoEntry {
     owner: String,
@@ -48,6 +47,24 @@ struct CandidateRepoEntry {
     default_branch: Option<String>,
     sources: Vec<String>,
     commit_matches: usize,
+}
+
+#[derive(Debug, Clone)]
+struct DiscoveredCommit {
+    repo_full_name: String,
+    item: GhCommitItem,
+    role: CommitMatchRole,
+}
+
+struct SearchSessionOutcome {
+    commits: Vec<DiscoveredCommit>,
+    author_commits_count: usize,
+    committer_commits_count: usize,
+    windows_complete: usize,
+    windows_partial: usize,
+    stopped_due_to_budget: bool,
+    health: ProviderHealth,
+    error_message: Option<String>,
 }
 
 pub struct AnalysisEngine {
@@ -184,6 +201,352 @@ impl AnalysisEngine {
         Ok(report)
     }
 
+    async fn run_global_commit_search(
+        &self,
+        username: &str,
+        created_at: chrono::DateTime<Utc>,
+        mode: AnalysisMode,
+    ) -> SearchSessionOutcome {
+        let mut map: HashMap<(String, String), (GhCommitItem, CommitMatchRole)> = HashMap::new();
+        let mut author_commits_count = 0usize;
+        let mut committer_commits_count = 0usize;
+        let mut windows_complete = 0usize;
+        let mut windows_partial = 0usize;
+        let mut stopped_due_to_budget = false;
+        let mut first_error: Option<SpoorError> = None;
+
+        let max_requests = match mode {
+            AnalysisMode::Fast => 2,
+            AnalysisMode::Deep => 14,
+        };
+        let mut requests_used = 0usize;
+
+        let start_date = created_at.date_naive();
+        let end_date = Utc::now().date_naive();
+
+        if mode == AnalysisMode::Fast {
+            if requests_used < max_requests {
+                requests_used += 1;
+                let query = format!("author:{username}");
+                match self.github.search_commits(&query, 1, 100, Some("author-date")).await {
+                    Ok(res) => {
+                        let count = res.items.len();
+                        author_commits_count += count;
+                        if res.total_count <= 100 {
+                            windows_complete += 1;
+                        } else {
+                            windows_partial += 1;
+                        }
+                        for item in res.items {
+                            let repo_full = item.repository.full_name.clone();
+                            let sha = item.sha.clone();
+                            let key = (repo_full, sha.clone());
+                            let commit_item = GhCommitItem {
+                                sha,
+                                html_url: item.html_url,
+                                commit: item.commit,
+                                author: item.author,
+                                committer: item.committer,
+                            };
+                            map.insert(key, (commit_item, CommitMatchRole::Author));
+                        }
+                    }
+                    Err(e) => {
+                        windows_partial += 1;
+                        if first_error.is_none() {
+                            first_error = Some(e);
+                        }
+                    }
+                }
+            }
+        } else {
+            let mut queue: VecDeque<(NaiveDate, NaiveDate)> = VecDeque::new();
+            queue.push_back((start_date, end_date));
+
+            while let Some((w_start, w_end)) = queue.pop_front() {
+                if requests_used >= max_requests {
+                    windows_partial += 1 + queue.len();
+                    stopped_due_to_budget = true;
+                    queue.clear();
+                    break;
+                }
+
+                let is_full_span = w_start == start_date && w_end == end_date;
+                let query = if is_full_span {
+                    format!("author:{username}")
+                } else {
+                    format!("author:{username} author-date:{w_start}..{w_end}")
+                };
+
+                requests_used += 1;
+                match self.github.search_commits(&query, 1, 100, Some("author-date")).await {
+                    Ok(res) => {
+                        author_commits_count += res.items.len();
+                        for item in res.items {
+                            let repo_full = item.repository.full_name.clone();
+                            let sha = item.sha.clone();
+                            let key = (repo_full, sha.clone());
+                            let commit_item = GhCommitItem {
+                                sha,
+                                html_url: item.html_url,
+                                commit: item.commit,
+                                author: item.author,
+                                committer: item.committer,
+                            };
+                            map.insert(key, (commit_item, CommitMatchRole::Author));
+                        }
+
+                        if res.total_count <= 100 {
+                            windows_complete += 1;
+                        } else if res.total_count <= 300 && requests_used < max_requests {
+                            let total_pages = (res.total_count as usize).div_ceil(100);
+                            let mut paginated_fully = true;
+                            for p in 2..=total_pages {
+                                if requests_used >= max_requests {
+                                    paginated_fully = false;
+                                    stopped_due_to_budget = true;
+                                    break;
+                                }
+                                requests_used += 1;
+                                match self.github.search_commits(&query, p, 100, Some("author-date")).await {
+                                    Ok(page_res) => {
+                                        author_commits_count += page_res.items.len();
+                                        for item in page_res.items {
+                                            let repo_full = item.repository.full_name.clone();
+                                            let sha = item.sha.clone();
+                                            let key = (repo_full, sha.clone());
+                                            let commit_item = GhCommitItem {
+                                                sha,
+                                                html_url: item.html_url,
+                                                commit: item.commit,
+                                                author: item.author,
+                                                committer: item.committer,
+                                            };
+                                            map.insert(key, (commit_item, CommitMatchRole::Author));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        paginated_fully = false;
+                                        if first_error.is_none() {
+                                            first_error = Some(e);
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                            if paginated_fully {
+                                windows_complete += 1;
+                            } else {
+                                windows_partial += 1;
+                            }
+                        } else if w_start < w_end {
+                            let span_days = (w_end - w_start).num_days();
+                            if span_days >= 2 {
+                                let mid = w_start + chrono::Duration::days(span_days / 2);
+                                let next_day = mid + chrono::Duration::days(1);
+                                queue.push_back((w_start, mid));
+                                queue.push_back((next_day, w_end));
+                            } else {
+                                windows_partial += 1;
+                            }
+                        } else {
+                            windows_partial += 1;
+                        }
+                    }
+                    Err(e) => {
+                        windows_partial += 1;
+                        if first_error.is_none() {
+                            first_error = Some(e);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        if mode == AnalysisMode::Fast {
+            if requests_used < max_requests {
+                let query = format!("committer:{username}");
+                match self.github.search_commits(&query, 1, 100, Some("committer-date")).await {
+                    Ok(res) => {
+                        let count = res.items.len();
+                        committer_commits_count += count;
+                        if res.total_count <= 100 {
+                            windows_complete += 1;
+                        } else {
+                            windows_partial += 1;
+                        }
+                        for item in res.items {
+                            let repo_full = item.repository.full_name.clone();
+                            let sha = item.sha.clone();
+                            let key = (repo_full, sha.clone());
+                            let commit_item = GhCommitItem {
+                                sha,
+                                html_url: item.html_url,
+                                commit: item.commit,
+                                author: item.author,
+                                committer: item.committer,
+                            };
+                            map.entry(key)
+                                .and_modify(|existing| existing.1 = CommitMatchRole::Both)
+                                .or_insert((commit_item, CommitMatchRole::Committer));
+                        }
+                    }
+                    Err(e) => {
+                        windows_partial += 1;
+                        if first_error.is_none() {
+                            first_error = Some(e);
+                        }
+                    }
+                }
+            }
+        } else {
+            let mut queue: VecDeque<(NaiveDate, NaiveDate)> = VecDeque::new();
+            queue.push_back((start_date, end_date));
+
+            while let Some((w_start, w_end)) = queue.pop_front() {
+                if requests_used >= max_requests {
+                    windows_partial += 1 + queue.len();
+                    stopped_due_to_budget = true;
+                    queue.clear();
+                    break;
+                }
+
+                let is_full_span = w_start == start_date && w_end == end_date;
+                let query = if is_full_span {
+                    format!("committer:{username}")
+                } else {
+                    format!("committer:{username} committer-date:{w_start}..{w_end}")
+                };
+
+                requests_used += 1;
+                match self.github.search_commits(&query, 1, 100, Some("committer-date")).await {
+                    Ok(res) => {
+                        committer_commits_count += res.items.len();
+                        for item in res.items {
+                            let repo_full = item.repository.full_name.clone();
+                            let sha = item.sha.clone();
+                            let key = (repo_full, sha.clone());
+                            let commit_item = GhCommitItem {
+                                sha,
+                                html_url: item.html_url,
+                                commit: item.commit,
+                                author: item.author,
+                                committer: item.committer,
+                            };
+                            map.entry(key)
+                                .and_modify(|existing| existing.1 = CommitMatchRole::Both)
+                                .or_insert((commit_item, CommitMatchRole::Committer));
+                        }
+
+                        if res.total_count <= 100 {
+                            windows_complete += 1;
+                        } else if res.total_count <= 300 && requests_used < max_requests {
+                            let total_pages = (res.total_count as usize).div_ceil(100);
+                            let mut paginated_fully = true;
+                            for p in 2..=total_pages {
+                                if requests_used >= max_requests {
+                                    paginated_fully = false;
+                                    stopped_due_to_budget = true;
+                                    break;
+                                }
+                                requests_used += 1;
+                                match self.github.search_commits(&query, p, 100, Some("committer-date")).await {
+                                    Ok(page_res) => {
+                                        committer_commits_count += page_res.items.len();
+                                        for item in page_res.items {
+                                            let repo_full = item.repository.full_name.clone();
+                                            let sha = item.sha.clone();
+                                            let key = (repo_full, sha.clone());
+                                            let commit_item = GhCommitItem {
+                                                sha,
+                                                html_url: item.html_url,
+                                                commit: item.commit,
+                                                author: item.author,
+                                                committer: item.committer,
+                                            };
+                                            map.entry(key)
+                                                .and_modify(|existing| existing.1 = CommitMatchRole::Both)
+                                                .or_insert((commit_item, CommitMatchRole::Committer));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        paginated_fully = false;
+                                        if first_error.is_none() {
+                                            first_error = Some(e);
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                            if paginated_fully {
+                                windows_complete += 1;
+                            } else {
+                                windows_partial += 1;
+                            }
+                        } else if w_start < w_end {
+                            let span_days = (w_end - w_start).num_days();
+                            if span_days >= 2 {
+                                let mid = w_start + chrono::Duration::days(span_days / 2);
+                                let next_day = mid + chrono::Duration::days(1);
+                                queue.push_back((w_start, mid));
+                                queue.push_back((next_day, w_end));
+                            } else {
+                                windows_partial += 1;
+                            }
+                        } else {
+                            windows_partial += 1;
+                        }
+                    }
+                    Err(e) => {
+                        windows_partial += 1;
+                        if first_error.is_none() {
+                            first_error = Some(e);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        let total_commits = map.len();
+        let (health, error_message) = if let Some(err) = first_error {
+            let msg = err.to_string();
+            if total_commits > 0 {
+                (ProviderHealth::Partial, Some(msg))
+            } else {
+                match err {
+                    SpoorError::RateLimitExceeded { .. } => (ProviderHealth::RateLimited, Some(msg)),
+                    _ => (ProviderHealth::Unavailable, Some(msg)),
+                }
+            }
+        } else if stopped_due_to_budget || windows_partial > 0 {
+            (ProviderHealth::Partial, Some("Search completed partially within request budget".to_string()))
+        } else {
+            (ProviderHealth::Ok, None)
+        };
+
+        let commits = map
+            .into_iter()
+            .map(|((repo_full_name, _), (item, role))| DiscoveredCommit {
+                repo_full_name,
+                item,
+                role,
+            })
+            .collect();
+
+        SearchSessionOutcome {
+            commits,
+            author_commits_count,
+            committer_commits_count,
+            windows_complete,
+            windows_partial,
+            stopped_due_to_budget,
+            health,
+            error_message,
+        }
+    }
+
     async fn analyze_user(
         &self,
         username: &str,
@@ -280,8 +643,7 @@ impl AnalysisEngine {
         };
 
         let mut candidate_map: HashMap<String, CandidateRepoEntry> = HashMap::new();
-        let mut raw_commits: Vec<(String, GhCommitItem)> = Vec::new();
-        let mut global_search_commits_count = 0usize;
+        let mut raw_commits: Vec<(String, GhCommitItem, Option<CommitMatchRole>)> = Vec::new();
         let mut git_inspected = false;
         let mut repos_scanned_count = 0usize;
 
@@ -374,105 +736,64 @@ impl AnalysisEngine {
             event_tx,
             SpoorEvent::ProviderStarted {
                 provider: "GitHub Commit Search".to_string(),
-                operation: format!("Searching global commits authored by {username}"),
+                operation: format!("Searching global commits authored or committed by {username}"),
             },
         )
         .await;
 
-        let search_query = format!("author:{username}");
-        let max_search_pages = match options.mode {
-            AnalysisMode::Fast => 1,
-            AnalysisMode::Deep => 3,
-        };
+        let search_outcome = self
+            .run_global_commit_search(username, gh_user.created_at, options.mode)
+            .await;
 
-        let mut search_succeeded = false;
-        let mut search_error_msg = None;
+        for disc in &search_outcome.commits {
+            let parts: Vec<&str> = disc.repo_full_name.split('/').collect();
+            let (owner, name) = if parts.len() == 2 {
+                (parts[0].to_string(), parts[1].to_string())
+            } else {
+                (username.to_string(), disc.repo_full_name.clone())
+            };
 
-        for page in 1..=max_search_pages {
-            match self.github.search_commits(&search_query, page, 100).await {
-                Ok(res) => {
-                    search_succeeded = true;
-                    global_search_commits_count += res.items.len();
-                    for item in res.items {
-                        let repo_full_name = item.repository.full_name.clone();
-                        let parts: Vec<&str> = repo_full_name.split('/').collect();
-                        let (owner, name) = if parts.len() == 2 {
-                            (parts[0].to_string(), parts[1].to_string())
-                        } else {
-                            (username.to_string(), item.repository.name.clone())
-                        };
-
-                        let entry =
-                            candidate_map
-                                .entry(repo_full_name.clone())
-                                .or_insert_with(|| CandidateRepoEntry {
-                                    owner,
-                                    name,
-                                    full_name: repo_full_name.clone(),
-                                    html_url: item.repository.html_url.clone(),
-                                    is_fork: item.repository.fork,
-                                    description: item.repository.description.clone(),
-                                    default_branch: None,
-                                    sources: Vec::new(),
-                                    commit_matches: 0,
-                                });
-                        entry.commit_matches += 1;
-                        if !entry.sources.contains(&"Commit Search".to_string()) {
-                            entry.sources.push("Commit Search".to_string());
-                        }
-
-                        raw_commits.push((
-                            repo_full_name,
-                            GhCommitItem {
-                                sha: item.sha,
-                                html_url: item.html_url,
-                                commit: item.commit,
-                                author: item.author,
-                                committer: item.committer,
-                            },
-                        ));
-                    }
-                    if res.incomplete_results || res.total_count <= (page * 100) as u64 {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    search_error_msg = Some(e.to_string());
-                    break;
-                }
+            let entry = candidate_map
+                .entry(disc.repo_full_name.clone())
+                .or_insert_with(|| CandidateRepoEntry {
+                    owner,
+                    name,
+                    full_name: disc.repo_full_name.clone(),
+                    html_url: format!("https://github.com/{}", disc.repo_full_name),
+                    is_fork: false,
+                    description: None,
+                    default_branch: None,
+                    sources: Vec::new(),
+                    commit_matches: 0,
+                });
+            entry.commit_matches += 1;
+            if !entry.sources.contains(&"Commit Search".to_string()) {
+                entry.sources.push("Commit Search".to_string());
             }
+
+            raw_commits.push((disc.repo_full_name.clone(), disc.item.clone(), Some(disc.role)));
         }
 
-        let search_status = if search_succeeded {
-            ProviderHealth::Ok
-        } else if let Some(ref msg) = search_error_msg {
-            if msg.contains("Rate limit") || msg.contains("rate limit") {
-                ProviderHealth::RateLimited
-            } else {
-                ProviderHealth::Partial
-            }
-        } else {
-            ProviderHealth::Ok
-        };
-
+        let total_search_commits = search_outcome.author_commits_count + search_outcome.committer_commits_count;
         report.provider_status.insert(
             "GitHub Commit Search".to_string(),
             ProviderStatus {
-                status: search_status,
+                status: search_outcome.health,
                 latency_ms: None,
-                items_retrieved: Some(global_search_commits_count),
+                items_retrieved: Some(total_search_commits),
                 rate_limit_remaining: Some(self.github.rest.rate_limit_remaining()),
                 rate_limit_reset: None,
                 retry_after_seconds: None,
-                message: search_error_msg.clone(),
+                message: search_outcome.error_message.clone(),
             },
         );
-        if let Some(ref err) = search_error_msg {
+        if let Some(ref err) = search_outcome.error_message {
             report
                 .warnings
                 .push(format!("GitHub commit search encountered an issue: {err}"));
         }
 
+        let mut graphql_years_fully_traversed = false;
         if self.github.is_authenticated() {
             Self::emit(
                 event_tx,
@@ -483,25 +804,32 @@ impl AnalysisEngine {
             )
             .await;
 
-            match self.github.fetch_user_contributions(username).await {
-                Ok(contribs) => {
-                    report.provider_status.insert(
-                        "GitHub Contributions (GraphQL)".to_string(),
-                        ProviderStatus {
-                            status: ProviderHealth::Ok,
-                            latency_ms: None,
-                            items_retrieved: Some(contribs.len()),
-                            rate_limit_remaining: None,
-                            rate_limit_reset: None,
-                            retry_after_seconds: None,
-                            message: None,
-                        },
-                    );
-                    for c in contribs {
-                        if !c.repository.is_private {
-                            let repo_full_name = c.repository.name_with_owner.clone();
-                            let entry =
-                                candidate_map
+            if options.mode == AnalysisMode::Deep {
+                match self.github.fetch_user_contributions_historical(username, 5).await {
+                    Ok(hist) => {
+                        graphql_years_fully_traversed = hist.fully_traversed;
+                        report.provider_status.insert(
+                            "GitHub Contributions (GraphQL)".to_string(),
+                            ProviderStatus {
+                                status: ProviderHealth::Ok,
+                                latency_ms: None,
+                                items_retrieved: Some(hist.contributions.len()),
+                                rate_limit_remaining: None,
+                                rate_limit_reset: None,
+                                retry_after_seconds: None,
+                                message: Some(format!(
+                                    "Discovered contributions across {} years",
+                                    hist.years_queried.len()
+                                )),
+                            },
+                        );
+                        for c in hist.contributions {
+                            if !c.repository.is_private {
+                                let repo_full_name = c.repository.name_with_owner.clone();
+                                let years_str = c.years.iter().map(|y| y.to_string()).collect::<Vec<_>>().join(", ");
+                                let src_label = format!("Contribution ({years_str})");
+
+                                let entry = candidate_map
                                     .entry(repo_full_name.clone())
                                     .or_insert_with(|| CandidateRepoEntry {
                                         owner: c.repository.owner.login.clone(),
@@ -514,28 +842,84 @@ impl AnalysisEngine {
                                         sources: Vec::new(),
                                         commit_matches: 0,
                                     });
-                            if !entry.sources.contains(&"Contribution".to_string()) {
-                                entry.sources.push("Contribution".to_string());
+                                if !entry.sources.contains(&src_label) {
+                                    entry.sources.push(src_label);
+                                }
                             }
                         }
                     }
+                    Err(e) => {
+                        report.provider_status.insert(
+                            "GitHub Contributions (GraphQL)".to_string(),
+                            ProviderStatus {
+                                status: ProviderHealth::Partial,
+                                latency_ms: None,
+                                items_retrieved: Some(0),
+                                rate_limit_remaining: None,
+                                rate_limit_reset: None,
+                                retry_after_seconds: None,
+                                message: Some(e.to_string()),
+                            },
+                        );
+                        report
+                            .warnings
+                            .push(format!("GraphQL contributions query failed: {e}"));
+                    }
                 }
-                Err(e) => {
-                    report.provider_status.insert(
-                        "GitHub Contributions (GraphQL)".to_string(),
-                        ProviderStatus {
-                            status: ProviderHealth::Partial,
-                            latency_ms: None,
-                            items_retrieved: Some(0),
-                            rate_limit_remaining: None,
-                            rate_limit_reset: None,
-                            retry_after_seconds: None,
-                            message: Some(e.to_string()),
-                        },
-                    );
-                    report
-                        .warnings
-                        .push(format!("GraphQL contributions query failed: {e}"));
+            } else {
+                match self.github.fetch_user_contributions(username).await {
+                    Ok(contribs) => {
+                        report.provider_status.insert(
+                            "GitHub Contributions (GraphQL)".to_string(),
+                            ProviderStatus {
+                                status: ProviderHealth::Ok,
+                                latency_ms: None,
+                                items_retrieved: Some(contribs.len()),
+                                rate_limit_remaining: None,
+                                rate_limit_reset: None,
+                                retry_after_seconds: None,
+                                message: None,
+                            },
+                        );
+                        for c in contribs {
+                            if !c.repository.is_private {
+                                let repo_full_name = c.repository.name_with_owner.clone();
+                                let entry = candidate_map
+                                    .entry(repo_full_name.clone())
+                                    .or_insert_with(|| CandidateRepoEntry {
+                                        owner: c.repository.owner.login.clone(),
+                                        name: c.repository.name.clone(),
+                                        full_name: repo_full_name,
+                                        html_url: c.repository.url.clone(),
+                                        is_fork: c.repository.is_fork,
+                                        description: c.repository.description.clone(),
+                                        default_branch: None,
+                                        sources: Vec::new(),
+                                        commit_matches: 0,
+                                    });
+                                if !entry.sources.contains(&"Contribution".to_string()) {
+                                    entry.sources.push("Contribution".to_string());
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        report.provider_status.insert(
+                            "GitHub Contributions (GraphQL)".to_string(),
+                            ProviderStatus {
+                                status: ProviderHealth::Partial,
+                                latency_ms: None,
+                                items_retrieved: Some(0),
+                                rate_limit_remaining: None,
+                                rate_limit_reset: None,
+                                retry_after_seconds: None,
+                                message: Some(e.to_string()),
+                            },
+                        );
+                        report
+                            .warnings
+                            .push(format!("GraphQL contributions query failed: {e}"));
+                    }
                 }
             }
         } else {
@@ -628,36 +1012,91 @@ impl AnalysisEngine {
             },
         );
 
-        let mut candidate_list: Vec<CandidateRepoEntry> = candidate_map.values().cloned().collect();
-        candidate_list.sort_by_key(|c| {
-            let mut score = 0i32;
-            if c.owner.eq_ignore_ascii_case(username) {
-                score += 100;
+        let mut owned_candidates = Vec::new();
+        let mut external_candidates = Vec::new();
+
+        for candidate in candidate_map.values() {
+            if candidate.owner.eq_ignore_ascii_case(username) {
+                owned_candidates.push(candidate.clone());
+            } else {
+                external_candidates.push(candidate.clone());
             }
+        }
+
+        let owned_discovered = owned_candidates.len();
+        let external_discovered = external_candidates.len();
+
+        owned_candidates.sort_by_key(|c| {
+            let mut score = 0i32;
             if !c.is_fork {
                 score += 50;
             }
             score += (c.commit_matches as i32) * 10;
-            if c.sources.contains(&"Contribution".to_string()) {
-                score += 40;
-            }
             if c.sources.contains(&"Recent Activity".to_string()) {
                 score += 20;
             }
             std::cmp::Reverse(score)
         });
 
-        let (candidate_scan_limit, commit_per_repo_limit) = match options.mode {
-            AnalysisMode::Fast => (5, 50),
-            AnalysisMode::Deep => (15, 100),
+        external_candidates.sort_by_key(|c| {
+            let mut score = 0i32;
+            score += (c.commit_matches as i32) * 100;
+            if c.sources.iter().any(|s| s.starts_with("Contribution")) {
+                score += 50;
+            }
+            if c.sources.contains(&"Recent Activity".to_string()) {
+                score += 20;
+            }
+            if !c.is_fork {
+                score += 10;
+            }
+            std::cmp::Reverse(score)
+        });
+
+        let (max_total_candidates, reserved_external, reserved_owned, commit_per_repo_limit) = match options.mode {
+            AnalysisMode::Fast => (8, 4, 4, 50),
+            AnalysisMode::Deep => (25, 12, 13, 500),
         };
 
-        let eligible_candidates: Vec<CandidateRepoEntry> = candidate_list
-            .into_iter()
-            .take(candidate_scan_limit)
-            .collect();
+        let mut eligible_candidates = Vec::new();
+        let mut ext_iter = external_candidates.into_iter();
+        let mut owned_iter = owned_candidates.into_iter();
+
+        for _ in 0..reserved_external {
+            if let Some(c) = ext_iter.next() {
+                eligible_candidates.push(c);
+            }
+        }
+        for _ in 0..reserved_owned {
+            if let Some(c) = owned_iter.next() {
+                eligible_candidates.push(c);
+            }
+        }
+        while eligible_candidates.len() < max_total_candidates {
+            if let Some(c) = ext_iter.next() {
+                eligible_candidates.push(c);
+            } else if let Some(c) = owned_iter.next() {
+                eligible_candidates.push(c);
+            } else {
+                break;
+            }
+        }
+
+        let candidates_selected = eligible_candidates.len();
+        let owned_selected = eligible_candidates
+            .iter()
+            .filter(|c| c.owner.eq_ignore_ascii_case(username))
+            .count();
+        let external_selected = eligible_candidates
+            .iter()
+            .filter(|c| !c.owner.eq_ignore_ascii_case(username))
+            .count();
+        let candidates_skipped = candidate_map.len().saturating_sub(candidates_selected);
 
         let mut scanned_repo_meta: HashMap<String, ScannedRepoMeta> = HashMap::new();
+        let mut repository_scans_attempted = 0usize;
+        let mut repository_scans_succeeded = 0usize;
+        let mut repository_scans_failed = 0usize;
 
         for (idx, r) in eligible_candidates.iter().enumerate() {
             Self::emit(
@@ -670,25 +1109,45 @@ impl AnalysisEngine {
             )
             .await;
 
+            repository_scans_attempted += 1;
             let commits_res = self
                 .github
                 .fetch_repository_commits(&r.owner, &r.name, commit_per_repo_limit)
                 .await;
 
-            if let Ok(commits) = commits_res {
-                if !commits.is_empty() {
-                    repos_scanned_count += 1;
-                    for c in commits {
-                        raw_commits.push((r.full_name.clone(), c));
+            match commits_res {
+                Ok(commits) => {
+                    repository_scans_succeeded += 1;
+                    if !commits.is_empty() {
+                        repos_scanned_count += 1;
+                        for c in commits {
+                            raw_commits.push((r.full_name.clone(), c, None));
+                        }
                     }
+                }
+                Err(e) => {
+                    repository_scans_failed += 1;
+                    report
+                        .warnings
+                        .push(format!("Failed to retrieve commits for {}: {e}", r.full_name));
                 }
             }
 
-            let langs = self
+            let langs_res = self
                 .github
                 .fetch_repository_languages(&r.owner, &r.name)
-                .await
-                .ok();
+                .await;
+            let langs = match langs_res {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    if !matches!(&e, SpoorError::RepoNotFound(_)) {
+                        report
+                            .warnings
+                            .push(format!("Failed to retrieve languages for {}: {e}", r.full_name));
+                    }
+                    None
+                }
+            };
 
             let default_branch = r.default_branch.as_deref().unwrap_or("HEAD");
             let tree_res = self
@@ -700,11 +1159,24 @@ impl AnalysisEngine {
                 Ok(tree) if !tree.tree.is_empty() => Some(detect_hygiene_from_paths(
                     tree.tree.iter().map(|item| item.path.as_str()),
                 )),
-                _ => None,
+                Ok(_) => None,
+                Err(e) => {
+                    if !matches!(&e, SpoorError::RepoNotFound(_)) {
+                        report
+                            .warnings
+                            .push(format!("Failed to inspect tree for {}: {e}", r.full_name));
+                    }
+                    None
+                }
             };
 
             scanned_repo_meta.insert(r.full_name.clone(), (langs, hygiene));
         }
+
+        let mut git_attempted = 0usize;
+        let mut git_succeeded = 0usize;
+        let mut git_failed = 0usize;
+        let mut git_timed_out = 0usize;
 
         if options.mode == AnalysisMode::Deep {
             if GitInspector::is_git_available().await {
@@ -727,11 +1199,13 @@ impl AnalysisEngine {
                     .collect();
 
                 for candidate in &git_candidates {
+                    git_attempted += 1;
                     match git_inspector
-                        .inspect_repo_history(&candidate.owner, &candidate.name, 500)
+                        .inspect_repo_history(&candidate.owner, &candidate.name, 2000)
                         .await
                     {
                         Ok(git_commits) => {
+                            git_succeeded += 1;
                             git_commits_found += git_commits.len();
                             for gc in git_commits {
                                 raw_commits.push((
@@ -767,29 +1241,49 @@ impl AnalysisEngine {
                                         author: None,
                                         committer: None,
                                     },
+                                    None,
                                 ));
                             }
                         }
+                        Err(SpoorError::Timeout { .. }) => {
+                            git_timed_out += 1;
+                            git_failed += 1;
+                            report
+                                .warnings
+                                .push(format!("Git bare clone timed out for {}", candidate.full_name));
+                        }
                         Err(e) => {
-                            debug!(repo = %candidate.full_name, err = %e, "Git history inspection skipped for repository");
+                            git_failed += 1;
+                            report
+                                .warnings
+                                .push(format!("Git bare clone failed for {}: {e}", candidate.full_name));
                         }
                     }
                 }
 
-                git_inspected = true;
+                git_inspected = git_succeeded > 0;
+                let (status, msg) = if git_attempted == 0 {
+                    (ProviderHealth::Skipped, "No candidate repositories matched git history inspection criteria".to_string())
+                } else if git_succeeded == git_attempted {
+                    (ProviderHealth::Ok, format!("Inspected all {git_succeeded} candidate repositories via bare git clone"))
+                } else if git_succeeded > 0 {
+                    (ProviderHealth::Partial, format!("{git_succeeded} of {git_attempted} candidate repositories inspected ({git_failed} failed)"))
+                } else if git_timed_out > 0 {
+                    (ProviderHealth::Unavailable, format!("All {git_attempted} candidate git clone operations timed out"))
+                } else {
+                    (ProviderHealth::Unavailable, format!("All {git_attempted} candidate git clone operations failed"))
+                };
+
                 report.provider_status.insert(
                     "Git History".to_string(),
                     ProviderStatus {
-                        status: ProviderHealth::Ok,
+                        status,
                         latency_ms: None,
                         items_retrieved: Some(git_commits_found),
                         rate_limit_remaining: None,
                         rate_limit_reset: None,
                         retry_after_seconds: None,
-                        message: Some(format!(
-                            "Inspected {} candidate repositories via bare git clone",
-                            git_candidates.len()
-                        )),
+                        message: Some(msg),
                     },
                 );
             } else {
@@ -869,6 +1363,36 @@ impl AnalysisEngine {
                 hygiene: hyg,
                 html_url: r.html_url.clone(),
             });
+        }
+
+        for r in &eligible_candidates {
+            if !gh_repos.iter().any(|gr| gr.full_name.eq_ignore_ascii_case(&r.full_name)) {
+                let (langs, hyg) = match scanned_repo_meta.remove(&r.full_name) {
+                    Some((l, h)) => (l, h),
+                    None => (None, None),
+                };
+                repo_reports.push(RepoReport {
+                    name: r.name.clone(),
+                    full_name: r.full_name.clone(),
+                    description: r.description.clone(),
+                    is_fork: r.is_fork,
+                    is_archived: false,
+                    default_branch: r.default_branch.clone().unwrap_or_else(|| "HEAD".into()),
+                    stars: 0,
+                    forks: 0,
+                    open_issues: 0,
+                    size_kb: 0,
+                    primary_language: None,
+                    languages: langs,
+                    created_at: None,
+                    updated_at: None,
+                    pushed_at: None,
+                    topics: Vec::new(),
+                    license_spdx: None,
+                    hygiene: hyg,
+                    html_url: r.html_url.clone(),
+                });
+            }
         }
 
         Self::emit(
@@ -1194,7 +1718,7 @@ impl AnalysisEngine {
             );
         }
 
-        for (repo_full_name, item) in &raw_commits {
+        for (repo_full_name, item, match_role) in &raw_commits {
             let author = item.commit.author.as_ref();
             let committer = item.commit.committer.as_ref();
 
@@ -1207,9 +1731,21 @@ impl AnalysisEngine {
             let author_email = author.map(|a| a.email.trim()).filter(|e| !e.is_empty());
             let committer_email = committer.map(|c| c.email.trim()).filter(|e| !e.is_empty());
 
+            let role_suffix = match match_role {
+                Some(CommitMatchRole::Author) => " via global commit author search",
+                Some(CommitMatchRole::Committer) => " via global commit committer search",
+                Some(CommitMatchRole::Both) => " via global commit author & committer search",
+                None => "",
+            };
+
+            let commit_source = if match_role.is_some() {
+                "GitHub Commit Search"
+            } else {
+                "Public Git Commit Metadata"
+            };
+
             match (author_email, committer_email) {
                 (Some(a_email), Some(c_email)) if a_email.eq_ignore_ascii_case(c_email) => {
-                    // Author and committer are the same identity: count commit once, emit single provenance
                     let a_actor = author.unwrap();
                     let norm = a_email.to_lowercase();
                     let entry = identities_map
@@ -1225,7 +1761,7 @@ impl AnalysisEngine {
                             last_seen: a_actor.date,
                             commits_observed: 0,
                             repositories: Vec::new(),
-                            sources: vec!["Public Git Commit Metadata".to_string()],
+                            sources: vec![commit_source.to_string()],
                             is_verified_signer: false,
                         });
 
@@ -1235,6 +1771,9 @@ impl AnalysisEngine {
                     }
                     if !entry.repositories.contains(repo_full_name) {
                         entry.repositories.push(repo_full_name.clone());
+                    }
+                    if !entry.sources.contains(&commit_source.to_string()) {
+                        entry.sources.push(commit_source.to_string());
                     }
                     if let Some(d) = a_actor.date {
                         if entry.first_seen.is_none_or(|existing| d < existing) {
@@ -1246,18 +1785,17 @@ impl AnalysisEngine {
                     }
 
                     report.provenance.push(
-                        Provenance::new("Git Commit Metadata", Classification::Observed)
+                        Provenance::new(commit_source, Classification::Observed)
                             .with_source_url(&item.html_url)
                             .with_repository(repo_full_name)
                             .with_commit(&item.sha)
                             .with_notes(format!(
-                                "Email observed as author & committer: {}",
-                                a_actor.email
+                                "Email observed as author & committer{}: {}",
+                                role_suffix, a_actor.email
                             )),
                     );
                 }
                 _ => {
-                    // Process author and committer individually if distinct
                     if let Some(a_actor) = author {
                         let email_norm = a_actor.email.trim().to_lowercase();
                         if !email_norm.is_empty() {
@@ -1273,7 +1811,7 @@ impl AnalysisEngine {
                                     last_seen: a_actor.date,
                                     commits_observed: 0,
                                     repositories: Vec::new(),
-                                    sources: vec!["Public Git Commit Metadata".to_string()],
+                                    sources: vec![commit_source.to_string()],
                                     is_verified_signer: false,
                                 }
                             });
@@ -1285,6 +1823,9 @@ impl AnalysisEngine {
                             if !entry.repositories.contains(repo_full_name) {
                                 entry.repositories.push(repo_full_name.clone());
                             }
+                            if !entry.sources.contains(&commit_source.to_string()) {
+                                entry.sources.push(commit_source.to_string());
+                            }
                             if let Some(d) = a_actor.date {
                                 if entry.first_seen.is_none_or(|existing| d < existing) {
                                     entry.first_seen = Some(d);
@@ -1295,13 +1836,13 @@ impl AnalysisEngine {
                             }
 
                             report.provenance.push(
-                                Provenance::new("Git Commit Metadata", Classification::Observed)
+                                Provenance::new(commit_source, Classification::Observed)
                                     .with_source_url(&item.html_url)
                                     .with_repository(repo_full_name)
                                     .with_commit(&item.sha)
                                     .with_notes(format!(
-                                        "Email observed as author: {}",
-                                        a_actor.email
+                                        "Email observed as author{}: {}",
+                                        role_suffix, a_actor.email
                                     )),
                             );
                         }
@@ -1322,7 +1863,7 @@ impl AnalysisEngine {
                                     last_seen: c_actor.date,
                                     commits_observed: 0,
                                     repositories: Vec::new(),
-                                    sources: vec!["Public Git Commit Metadata".to_string()],
+                                    sources: vec![commit_source.to_string()],
                                     is_verified_signer: false,
                                 }
                             });
@@ -1334,6 +1875,9 @@ impl AnalysisEngine {
                             if !entry.repositories.contains(repo_full_name) {
                                 entry.repositories.push(repo_full_name.clone());
                             }
+                            if !entry.sources.contains(&commit_source.to_string()) {
+                                entry.sources.push(commit_source.to_string());
+                            }
                             if let Some(d) = c_actor.date {
                                 if entry.first_seen.is_none_or(|existing| d < existing) {
                                     entry.first_seen = Some(d);
@@ -1344,13 +1888,13 @@ impl AnalysisEngine {
                             }
 
                             report.provenance.push(
-                                Provenance::new("Git Commit Metadata", Classification::Observed)
+                                Provenance::new(commit_source, Classification::Observed)
                                     .with_source_url(&item.html_url)
                                     .with_repository(repo_full_name)
                                     .with_commit(&item.sha)
                                     .with_notes(format!(
-                                        "Email observed as committer: {}",
-                                        c_actor.email
+                                        "Email observed as committer{}: {}",
+                                        role_suffix, c_actor.email
                                     )),
                             );
                         }
@@ -1517,19 +2061,44 @@ impl AnalysisEngine {
         };
 
         let is_partial = (repos_scanned_count < total_repos_count)
-            || (gh_user.public_repos as usize > max_repos);
+            || (gh_user.public_repos as usize > max_repos)
+            || candidates_skipped > 0
+            || search_outcome.windows_partial > 0
+            || search_outcome.stopped_due_to_budget
+            || !graphql_years_fully_traversed;
         report.coverage = CoverageRecord {
             commits_scanned: raw_commits.len(),
             repositories_scanned: repos_scanned_count,
             repositories_total: gh_user.public_repos as usize,
             candidate_repositories_found: candidate_map.len(),
-            global_commits_found: global_search_commits_count,
+            global_commits_found: total_search_commits,
             git_history_inspected: git_inspected,
             is_partial,
             notes: Some(format!(
                 "Scanned {repos_scanned_count} of {} public repositories with a budget limit of {commit_per_repo_limit} commits per repo in {} mode",
                 gh_user.public_repos, options.mode
             )),
+            discovery: Some(DiscoveryCoverage {
+                owned_repositories_discovered: owned_discovered,
+                external_repositories_discovered: external_discovered,
+                candidates_selected,
+                owned_selected,
+                external_selected,
+                candidates_skipped,
+                repository_scans_attempted,
+                repository_scans_succeeded,
+                repository_scans_failed,
+                global_author_commits_found: search_outcome.author_commits_count,
+                global_committer_commits_found: search_outcome.committer_commits_count,
+                commit_search_windows_complete: search_outcome.windows_complete,
+                commit_search_windows_partial: search_outcome.windows_partial,
+                git_history_attempted: git_attempted,
+                git_history_succeeded: git_succeeded,
+                git_history_failed: git_failed,
+                git_history_timed_out: git_timed_out,
+                graphql_years_fully_traversed,
+                stopped_due_to_budget: search_outcome.stopped_due_to_budget || candidates_skipped > 0,
+            }),
         };
 
         report.summary = ReportSummary {
@@ -1892,6 +2461,7 @@ impl AnalysisEngine {
             candidate_repositories_found: 1,
             global_commits_found: 0,
             git_history_inspected: false,
+            discovery: None,
             is_partial: commits.len() >= commit_budget,
             notes: Some(format!(
                 "Scanned {} commits from target repository in {mode} mode",

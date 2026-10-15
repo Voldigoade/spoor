@@ -115,8 +115,9 @@ impl GitHubProvider {
         query: &str,
         page: usize,
         per_page: usize,
+        sort: Option<&str>,
     ) -> Result<GhCommitSearchResult, SpoorError> {
-        self.rest.search_commits(query, page, per_page).await
+        self.rest.search_commits(query, page, per_page, sort).await
     }
 
     pub async fn fetch_user_contributions(
@@ -124,5 +125,15 @@ impl GitHubProvider {
         username: &str,
     ) -> Result<Vec<graphql::GhGraphQLContributionByRepo>, SpoorError> {
         self.graphql.get_user_commit_contributions(username).await
+    }
+
+    pub async fn fetch_user_contributions_historical(
+        &self,
+        username: &str,
+        max_historical_years: usize,
+    ) -> Result<graphql::HistoricalContributionsResult, SpoorError> {
+        self.graphql
+            .get_user_commit_contributions_historical(username, max_historical_years)
+            .await
     }
 }
