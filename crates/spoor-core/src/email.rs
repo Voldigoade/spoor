@@ -159,7 +159,7 @@ mod tests {
             EmailType::DomainEmail
         );
         assert_eq!(
-            classify_email("contact@anonseclab.org", None),
+            classify_email("user@example.com", None),
             EmailType::DomainEmail
         );
     }

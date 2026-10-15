@@ -26,7 +26,7 @@ services:
       # If omitted or empty, Spoor operates in default direct-connect mode: socket peer IP
       # is used exclusively and X-Forwarded-For is strictly ignored to prevent spoofing.
       - SPOOR_TRUSTED_PROXIES=${SPOOR_TRUSTED_PROXIES:-}
-      # Production CORS allowed origins (comma-separated exact origins, e.g. https://voldigoade-portfolio.vercel.app).
+      # Production CORS allowed origins (comma-separated exact origins, e.g. https://voldigoade.xyz).
       # If omitted, defaults to local development origins (http://localhost, http://127.0.0.1).
       - SPOOR_ALLOWED_ORIGINS=${SPOOR_ALLOWED_ORIGINS:-}
     volumes:
