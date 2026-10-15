@@ -6,7 +6,7 @@ Spoor reads public GitHub metadata and optional public enrichment. It cannot ret
 
 User FAST scans up to 3 repositories and 30 commits each; DEEP scans up to 8 repositories and 50 commits each. Non-forks are preferred. The report records sampled repositories, commits, provider status and partial coverage. These bounds are not a complete history scan, including in DEEP mode.
 
-Public activity comes from GitHub's bounded event window: events from the previous 30 days, with at most 300 returned. Spoor requests up to three pages of 100, follows the API's next-page link and stops when there is no next page or a page is short. Events older than 30 days are filtered out. A first-page failure marks Public Events unavailable; a later-page failure preserves collected events and marks coverage partial with a warning. Zero returned events does not establish inactivity.
+Public activity comes from GitHub's bounded event window: events from the previous 30 days, with at most 300 returned. Spoor requests up to three pages of 100, follows the API's next-page link and stops when there is no next page or a page is short. Events older than 30 days are filtered out. A first-page failure marks Public Events unavailable, or rate limited for HTTP 403/429; a later-page failure preserves collected events and marks coverage partial with a warning. Zero returned events does not establish inactivity.
 
 ## Enrichment and caches
 

@@ -502,11 +502,18 @@ impl AnalysisEngine {
                 };
                 (batch.events, batch.warning, health)
             }
-            Err(error) => (
-                Vec::new(),
-                Some(format!("Public events request failed: {error}")),
-                ProviderHealth::Unavailable,
-            ),
+            Err(error) => {
+                let health = if matches!(&error, SpoorError::RateLimitExceeded { .. }) {
+                    ProviderHealth::RateLimited
+                } else {
+                    ProviderHealth::Unavailable
+                };
+                (
+                    Vec::new(),
+                    Some(format!("Public events request failed: {error}")),
+                    health,
+                )
+            }
         };
         let base_event_note = "GitHub public events cover only the previous 30 days, up to 300 events. Spoor requests up to three pages of 100 and filters older results.";
         let window_note = event_warning.as_ref().map_or_else(
