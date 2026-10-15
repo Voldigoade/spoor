@@ -245,7 +245,7 @@ async fn test_cors_exact_origin_matching() {
     // Test exact origin matching with SPOOR_ALLOWED_ORIGINS
     std::env::set_var(
         "SPOOR_ALLOWED_ORIGINS",
-        "https://voldigoade-portfolio.vercel.app, https://portfolio.example.com",
+        "https://voldigoade.xyz, https://portfolio.example.com",
     );
 
     let engine = test_engine();
@@ -267,7 +267,7 @@ async fn test_cors_exact_origin_matching() {
             reqwest::Method::OPTIONS,
             format!("http://{addr}/v1/lookups"),
         )
-        .header("Origin", "https://voldigoade-portfolio.vercel.app")
+        .header("Origin", "https://voldigoade.xyz")
         .header("Access-Control-Request-Method", "POST")
         .send()
         .await
@@ -276,7 +276,7 @@ async fn test_cors_exact_origin_matching() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
         resp.headers().get("access-control-allow-origin").unwrap(),
-        "https://voldigoade-portfolio.vercel.app"
+        "https://voldigoade.xyz"
     );
 
     // 2. Unauthorized origin: preflight must NOT return access-control-allow-origin

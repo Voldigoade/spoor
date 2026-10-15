@@ -285,7 +285,7 @@ impl Report {
             profile: None,
             repositories: Vec::new(),
             activity: ActivityReport {
-                window_note: "Public event retention window is limited to events from the previous 30 days and up to 300 events by GitHub API."
+                window_note: "GitHub public events cover up to 300 events from the previous 30 days. Zero returned events do not establish inactivity."
                     .to_string(),
                 ..Default::default()
             },
