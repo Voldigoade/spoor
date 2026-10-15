@@ -52,12 +52,7 @@ async fn mount_page(
 }
 
 fn provider(server: &MockServer) -> GitHubProvider {
-    GitHubProvider::new(
-        HttpClient::new(),
-        None,
-        Some(server.uri()),
-        None,
-    )
+    GitHubProvider::new(HttpClient::new(), None, Some(server.uri()), None)
 }
 
 #[tokio::test]

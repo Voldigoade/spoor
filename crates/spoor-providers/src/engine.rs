@@ -509,11 +509,10 @@ impl AnalysisEngine {
             ),
         };
         let base_event_note = "GitHub public events cover only the previous 30 days, up to 300 events. Spoor requests up to three pages of 100 and filters older results.";
-        let window_note = event_warning
-            .as_ref()
-            .map_or_else(|| base_event_note.to_string(), |warning| {
-                format!("{base_event_note} {warning}")
-            });
+        let window_note = event_warning.as_ref().map_or_else(
+            || base_event_note.to_string(),
+            |warning| format!("{base_event_note} {warning}"),
+        );
         report.provider_status.insert(
             "Public Events".to_string(),
             ProviderStatus {

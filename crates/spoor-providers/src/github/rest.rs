@@ -6,7 +6,8 @@ use spoor_core::SpoorError;
 use tracing::debug;
 
 use super::models::{
-    GhCommitItem, GhCommunityProfile, GhEvent, GhEventBatch, GhGpgKey, GhRepo, GhSshKey, GhTreeResponse, GhUser,
+    GhCommitItem, GhCommunityProfile, GhEvent, GhEventBatch, GhGpgKey, GhRepo, GhSshKey,
+    GhTreeResponse, GhUser,
 };
 use crate::client::HttpClient;
 
@@ -276,9 +277,7 @@ impl GitHubRestClient {
 
             let status = resp.status();
             if !status.is_success() {
-                let message = format!(
-                    "Public events page {page} returned HTTP status {status}"
-                );
+                let message = format!("Public events page {page} returned HTTP status {status}");
                 if !collected_page {
                     if status == StatusCode::FORBIDDEN || status == StatusCode::TOO_MANY_REQUESTS {
                         return Err(SpoorError::RateLimitExceeded {
@@ -349,7 +348,8 @@ impl GitHubRestClient {
             if events.len() >= event_limit {
                 events.truncate(event_limit);
                 if event_limit == MAX_EVENTS && page == MAX_PAGES && has_next {
-                    warning = Some("GitHub's three-page public-events cap was reached.".to_string());
+                    warning =
+                        Some("GitHub's three-page public-events cap was reached.".to_string());
                 } else {
                     reached_end = true;
                 }
