@@ -1,6 +1,6 @@
 # HTTP operations
 
-These defaults match v0.1.3. Keep one application replica: active jobs, SSE channels, rate limits and the GitLeak budget live in process memory. A restart loses active lookup IDs. SQLite cache persistence is separate from lookup retention.
+These defaults match v0.1.4. Keep one application replica: active jobs, SSE channels, rate limits and the GitLeak budget live in process memory. A restart loses active lookup IDs. SQLite cache persistence is separate from lookup retention.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |

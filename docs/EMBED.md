@@ -1,6 +1,6 @@
 # Embedding Spoor
 
-The v0.1.3 service exposes asynchronous lookups under `/v1`. Reports use schema `1.1`. The [TypeScript reference client](../packages/spoor-client/src/index.ts) wraps these endpoints; it does not handle retries, polling recovery or UI state for you.
+The v0.1.4 service exposes asynchronous lookups under `/v1`. Reports use schema `1.1`. The [TypeScript reference client](../packages/spoor-client/src/index.ts) wraps these endpoints; it does not handle retries, polling recovery or UI state for you.
 
 ## Requests
 
@@ -60,7 +60,7 @@ const unsubscribe = client.streamEvents(lookup.id, renderProgress, recoverWithPo
 
 ## Reports and files
 
-The canonical [Rust report](../crates/spoor-core/src/report.rs) defines schema `1.1`. Its top-level fields are `schema_version`, `generator`, `target`, `mode`, `generated_at`, `summary`, optional `profile`, `repositories`, `activity`, `identities`, `keys`, `inferences`, `provider_status`, `coverage`, `provenance`, `warnings` and `limitations`. Generator version is `0.1.3` in this release.
+The canonical [Rust report](../crates/spoor-core/src/report.rs) defines schema `1.1`. Its top-level fields are `schema_version`, `generator`, `target`, `mode`, `generated_at`, `summary`, optional `profile`, `repositories`, `activity`, `identities`, `keys`, `inferences`, `provider_status`, `coverage`, `provenance`, `warnings` and `limitations`. Generator version is `0.1.4` in this release.
 
 Optional fields may be absent or null, depending on their serializer. Preserve partial coverage, provider warnings and evidence sources. Identity classification serializes as snake_case Rust variant names, for example `git_hub_no_reply` and `git_hub_system`. Summary address counts exclude system identities. Historical addresses are evidence, not current contact details. Activity is a bounded public window, not lifetime history. GitHub exposes up to 300 public events from the previous 30 days, with at most 100 per page. Spoor follows up to three pages and filters events older than 30 days. The report's `activity.window_note` describes this bound and any collection warning. The `provider_status["Public Events"]` entry is `ok` when the requested window was collected, `partial` when a later page or the three-page cap prevented a full response, and `unavailable` when the first page failed or `rate_limited` when GitHub returns HTTP 403/429. On later-page failure, returned events are partial data and the warning is preserved; a first-page failure returns no events and records the provider error. Zero events do not prove inactivity.
 

@@ -34,7 +34,7 @@ spoor cache stats
 spoor cache clear
 ```
 
-Run `spoor` without arguments for the interactive prompt. Version 0.1.3 supports `inspect`, `repo`, `export`, `help` and `quit` there.
+Run `spoor` without arguments for the interactive prompt. Version 0.1.4 supports `inspect`, `repo`, `export`, `help` and `quit` there.
 
 ## Modes
 
