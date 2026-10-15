@@ -8,8 +8,8 @@ use spoor_core::SpoorError;
 
 use self::graphql::GitHubGraphQLClient;
 use self::models::{
-    GhCommitItem, GhCommunityProfile, GhEventBatch, GhGpgKey, GhRepo, GhSshKey,
-    GhTreeResponse, GhUser,
+    GhCommitItem, GhCommunityProfile, GhEventBatch, GhGpgKey, GhRepo, GhSshKey, GhTreeResponse,
+    GhUser,
 };
 use self::rest::GitHubRestClient;
 use crate::client::HttpClient;
