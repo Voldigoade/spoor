@@ -6,7 +6,8 @@ use spoor_core::SpoorError;
 use tracing::debug;
 
 use super::models::{
-    GhCommitItem, GhCommunityProfile, GhEvent, GhGpgKey, GhRepo, GhSshKey, GhTreeResponse, GhUser,
+    GhCommitItem, GhCommitSearchResult, GhCommunityProfile, GhEvent, GhGpgKey, GhRepo, GhSshKey,
+    GhTreeResponse, GhUser,
 };
 use crate::client::HttpClient;
 
@@ -182,6 +183,54 @@ impl GitHubRestClient {
         serde_json::from_str::<GhRepo>(&body).map_err(|e| SpoorError::Serialization(e.to_string()))
     }
 
+    pub async fn search_commits(
+        &self,
+        query: &str,
+        page: usize,
+        per_page: usize,
+    ) -> Result<GhCommitSearchResult, SpoorError> {
+        let per_page = per_page.clamp(1, 100);
+        let encoded_query =
+            url::form_urlencoded::byte_serialize(query.as_bytes()).collect::<String>();
+        let url = format!(
+            "{}/search/commits?q={encoded_query}&page={page}&per_page={per_page}&sort=committer-date&order=desc",
+            self.base_url
+        );
+        let headers = self.headers();
+
+        let resp = self
+            .client
+            .send_with_retry(
+                || {
+                    self.client
+                        .request(Method::GET, &url)
+                        .headers(headers.clone())
+                },
+                2,
+            )
+            .await?;
+
+        let status = resp.status();
+        if status == StatusCode::FORBIDDEN || status == StatusCode::TOO_MANY_REQUESTS {
+            return Err(SpoorError::RateLimitExceeded {
+                provider: "GitHub REST (Search)".to_string(),
+                reset_at: self.client.rate_limit.reset_at(),
+                retry_after: None,
+            });
+        }
+        if !status.is_success() {
+            return Err(SpoorError::ProviderError {
+                provider: "GitHub REST (Search)".to_string(),
+                message: format!("Commit search returned HTTP status {status}"),
+            });
+        }
+
+        let body = HttpClient::read_body_limited(resp).await?;
+        serde_json::from_str::<GhCommitSearchResult>(&body).map_err(|e| {
+            SpoorError::Serialization(format!("Failed to parse commit search result: {e}"))
+        })
+    }
+
     pub async fn get_repo_commits(
         &self,
         owner: &str,
@@ -207,12 +256,28 @@ impl GitHubRestClient {
             )
             .await?;
 
-        if !resp.status().is_success() {
+        let status = resp.status();
+        if status == StatusCode::NOT_FOUND || status == StatusCode::CONFLICT {
             return Ok(Vec::new());
+        }
+        if status == StatusCode::FORBIDDEN || status == StatusCode::TOO_MANY_REQUESTS {
+            return Err(SpoorError::RateLimitExceeded {
+                provider: "GitHub REST".to_string(),
+                reset_at: self.client.rate_limit.reset_at(),
+                retry_after: None,
+            });
+        }
+        if !status.is_success() {
+            return Err(SpoorError::ProviderError {
+                provider: "GitHub REST".to_string(),
+                message: format!("Commit lookup for {owner}/{repo} returned HTTP status {status}"),
+            });
         }
 
         let body = HttpClient::read_body_limited(resp).await?;
-        let mut commits: Vec<GhCommitItem> = serde_json::from_str(&body).unwrap_or_default();
+        let mut commits: Vec<GhCommitItem> = serde_json::from_str(&body).map_err(|e| {
+            SpoorError::Serialization(format!("Failed to parse commits for {owner}/{repo}: {e}"))
+        })?;
         if commits.len() > limit {
             commits.truncate(limit);
         }
@@ -243,12 +308,28 @@ impl GitHubRestClient {
             )
             .await?;
 
-        if !resp.status().is_success() {
+        let status = resp.status();
+        if status == StatusCode::NOT_FOUND {
             return Ok(Vec::new());
+        }
+        if status == StatusCode::FORBIDDEN || status == StatusCode::TOO_MANY_REQUESTS {
+            return Err(SpoorError::RateLimitExceeded {
+                provider: "GitHub REST".to_string(),
+                reset_at: self.client.rate_limit.reset_at(),
+                retry_after: None,
+            });
+        }
+        if !status.is_success() {
+            return Err(SpoorError::ProviderError {
+                provider: "GitHub REST".to_string(),
+                message: format!("Events lookup for {username} returned HTTP status {status}"),
+            });
         }
 
         let body = HttpClient::read_body_limited(resp).await?;
-        let mut events: Vec<GhEvent> = serde_json::from_str(&body).unwrap_or_default();
+        let mut events: Vec<GhEvent> = serde_json::from_str(&body).map_err(|e| {
+            SpoorError::Serialization(format!("Failed to parse events for {username}: {e}"))
+        })?;
         if events.len() > limit {
             events.truncate(limit);
         }
@@ -271,12 +352,28 @@ impl GitHubRestClient {
             )
             .await?;
 
-        if !resp.status().is_success() {
+        let status = resp.status();
+        if status == StatusCode::NOT_FOUND {
             return Ok(Vec::new());
+        }
+        if status == StatusCode::FORBIDDEN || status == StatusCode::TOO_MANY_REQUESTS {
+            return Err(SpoorError::RateLimitExceeded {
+                provider: "GitHub REST".to_string(),
+                reset_at: self.client.rate_limit.reset_at(),
+                retry_after: None,
+            });
+        }
+        if !status.is_success() {
+            return Err(SpoorError::ProviderError {
+                provider: "GitHub REST".to_string(),
+                message: format!("GPG keys lookup for {username} returned HTTP status {status}"),
+            });
         }
 
         let body = HttpClient::read_body_limited(resp).await?;
-        Ok(serde_json::from_str(&body).unwrap_or_default())
+        serde_json::from_str(&body).map_err(|e| {
+            SpoorError::Serialization(format!("Failed to parse GPG keys for {username}: {e}"))
+        })
     }
 
     pub async fn get_user_ssh_keys(&self, username: &str) -> Result<Vec<GhSshKey>, SpoorError> {
@@ -295,12 +392,28 @@ impl GitHubRestClient {
             )
             .await?;
 
-        if !resp.status().is_success() {
+        let status = resp.status();
+        if status == StatusCode::NOT_FOUND {
             return Ok(Vec::new());
+        }
+        if status == StatusCode::FORBIDDEN || status == StatusCode::TOO_MANY_REQUESTS {
+            return Err(SpoorError::RateLimitExceeded {
+                provider: "GitHub REST".to_string(),
+                reset_at: self.client.rate_limit.reset_at(),
+                retry_after: None,
+            });
+        }
+        if !status.is_success() {
+            return Err(SpoorError::ProviderError {
+                provider: "GitHub REST".to_string(),
+                message: format!("SSH keys lookup for {username} returned HTTP status {status}"),
+            });
         }
 
         let body = HttpClient::read_body_limited(resp).await?;
-        Ok(serde_json::from_str(&body).unwrap_or_default())
+        serde_json::from_str(&body).map_err(|e| {
+            SpoorError::Serialization(format!("Failed to parse SSH keys for {username}: {e}"))
+        })
     }
 
     pub async fn get_repo_languages(
@@ -323,12 +436,30 @@ impl GitHubRestClient {
             )
             .await?;
 
-        if !resp.status().is_success() {
+        let status = resp.status();
+        if status == StatusCode::NOT_FOUND {
             return Ok(HashMap::new());
+        }
+        if status == StatusCode::FORBIDDEN || status == StatusCode::TOO_MANY_REQUESTS {
+            return Err(SpoorError::RateLimitExceeded {
+                provider: "GitHub REST".to_string(),
+                reset_at: self.client.rate_limit.reset_at(),
+                retry_after: None,
+            });
+        }
+        if !status.is_success() {
+            return Err(SpoorError::ProviderError {
+                provider: "GitHub REST".to_string(),
+                message: format!(
+                    "Languages lookup for {owner}/{repo} returned HTTP status {status}"
+                ),
+            });
         }
 
         let body = HttpClient::read_body_limited(resp).await?;
-        Ok(serde_json::from_str(&body).unwrap_or_default())
+        serde_json::from_str(&body).map_err(|e| {
+            SpoorError::Serialization(format!("Failed to parse languages for {owner}/{repo}: {e}"))
+        })
     }
 
     pub async fn get_repo_community_profile(
@@ -351,12 +482,32 @@ impl GitHubRestClient {
             )
             .await?;
 
-        if !resp.status().is_success() {
+        let status = resp.status();
+        if status == StatusCode::NOT_FOUND {
             return Ok(GhCommunityProfile::default());
+        }
+        if status == StatusCode::FORBIDDEN || status == StatusCode::TOO_MANY_REQUESTS {
+            return Err(SpoorError::RateLimitExceeded {
+                provider: "GitHub REST".to_string(),
+                reset_at: self.client.rate_limit.reset_at(),
+                retry_after: None,
+            });
+        }
+        if !status.is_success() {
+            return Err(SpoorError::ProviderError {
+                provider: "GitHub REST".to_string(),
+                message: format!(
+                    "Community profile for {owner}/{repo} returned HTTP status {status}"
+                ),
+            });
         }
 
         let body = HttpClient::read_body_limited(resp).await?;
-        Ok(serde_json::from_str(&body).unwrap_or_default())
+        serde_json::from_str(&body).map_err(|e| {
+            SpoorError::Serialization(format!(
+                "Failed to parse community profile for {owner}/{repo}: {e}"
+            ))
+        })
     }
 
     pub async fn get_repo_tree(
@@ -383,11 +534,27 @@ impl GitHubRestClient {
             )
             .await?;
 
-        if !resp.status().is_success() {
+        let status = resp.status();
+        if status == StatusCode::NOT_FOUND {
             return Ok(GhTreeResponse::default());
+        }
+        if status == StatusCode::FORBIDDEN || status == StatusCode::TOO_MANY_REQUESTS {
+            return Err(SpoorError::RateLimitExceeded {
+                provider: "GitHub REST".to_string(),
+                reset_at: self.client.rate_limit.reset_at(),
+                retry_after: None,
+            });
+        }
+        if !status.is_success() {
+            return Err(SpoorError::ProviderError {
+                provider: "GitHub REST".to_string(),
+                message: format!("Git tree for {owner}/{repo} returned HTTP status {status}"),
+            });
         }
 
         let body = HttpClient::read_body_limited(resp).await?;
-        Ok(serde_json::from_str(&body).unwrap_or_default())
+        serde_json::from_str(&body).map_err(|e| {
+            SpoorError::Serialization(format!("Failed to parse git tree for {owner}/{repo}: {e}"))
+        })
     }
 }

@@ -8,7 +8,7 @@ use crate::email::EmailType;
 use crate::provenance::Provenance;
 use crate::target::{AnalysisMode, Target};
 
-pub const SCHEMA_VERSION: &str = "1.1";
+pub const SCHEMA_VERSION: &str = "1.2";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeneratorInfo {
@@ -231,6 +231,12 @@ pub struct CoverageRecord {
     pub commits_scanned: usize,
     pub repositories_scanned: usize,
     pub repositories_total: usize,
+    #[serde(default)]
+    pub candidate_repositories_found: usize,
+    #[serde(default)]
+    pub global_commits_found: usize,
+    #[serde(default)]
+    pub git_history_inspected: bool,
     pub is_partial: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,

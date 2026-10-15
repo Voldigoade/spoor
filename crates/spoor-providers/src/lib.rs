@@ -1,11 +1,13 @@
 pub mod client;
 pub mod engine;
+pub mod git;
 pub mod github;
 pub mod gitleak;
 pub mod hygiene;
 
 pub use client::{HttpClient, RateLimitState, DEFAULT_USER_AGENT, MAX_RESPONSE_BYTES};
 pub use engine::AnalysisEngine;
+pub use git::{GitCommitRecord, GitInspector};
 pub use github::models as gh_models;
 pub use github::GitHubProvider;
 pub use gitleak::models as gl_models;

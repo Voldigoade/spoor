@@ -314,6 +314,28 @@ pub fn export_markdown(report: &Report) -> Result<String, SpoorError> {
     .unwrap();
     writeln!(
         out,
+        "| Candidate Repositories Found | {} |",
+        report.coverage.candidate_repositories_found
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| Global Commits Found | {} |",
+        report.coverage.global_commits_found
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| Git History Inspected | {} |",
+        if report.coverage.git_history_inspected {
+            "Yes (Bare Clone Metadata Scan)"
+        } else {
+            "No (API-only)"
+        }
+    )
+    .unwrap();
+    writeln!(
+        out,
         "| Coverage State | {} |",
         if report.coverage.is_partial {
             "Partial (budget limited)"

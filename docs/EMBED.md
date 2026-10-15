@@ -1,6 +1,6 @@
 # Embedding Spoor
 
-The v0.1.3 service exposes asynchronous lookups under `/v1`. Reports use schema `1.1`. The [TypeScript reference client](../packages/spoor-client/src/index.ts) wraps these endpoints; it does not handle retries, polling recovery or UI state for you.
+The v0.2.0 service exposes asynchronous lookups under `/v1`. Reports use schema `1.2`. The [TypeScript reference client](../packages/spoor-client/src/index.ts) wraps these endpoints; it does not handle retries, polling recovery or UI state for you.
 
 ## Requests
 
@@ -60,7 +60,7 @@ const unsubscribe = client.streamEvents(lookup.id, renderProgress, recoverWithPo
 
 ## Reports and files
 
-The canonical [Rust report](../crates/spoor-core/src/report.rs) defines schema `1.1`. Its top-level fields are `schema_version`, `generator`, `target`, `mode`, `generated_at`, `summary`, optional `profile`, `repositories`, `activity`, `identities`, `keys`, `inferences`, `provider_status`, `coverage`, `provenance`, `warnings` and `limitations`. Generator version is `0.1.3` in this release.
+The canonical [Rust report](../crates/spoor-core/src/report.rs) defines schema `1.2`. Its top-level fields are `schema_version`, `generator`, `target`, `mode`, `generated_at`, `summary`, optional `profile`, `repositories`, `activity`, `identities`, `keys`, `inferences`, `provider_status`, `coverage`, `provenance`, `warnings` and `limitations`. Generator version is `0.2.0` in this release.
 
 Optional fields may be absent or null, depending on their serializer. Preserve partial coverage, provider warnings and evidence sources. Identity classification serializes as snake_case Rust variant names, for example `git_hub_no_reply` and `git_hub_system`. Summary address counts exclude system identities. Historical addresses are evidence, not current contact details. Activity is a bounded public window, not lifetime history.
 

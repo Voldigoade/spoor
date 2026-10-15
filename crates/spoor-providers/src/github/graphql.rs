@@ -38,6 +38,54 @@ pub struct RateLimitData {
     pub reset_at: String,
 }
 
+#[derive(Deserialize, Debug, Clone)]
+pub struct GhGraphQLUserContributions {
+    pub user: Option<GhGraphQLUserContributionsNode>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct GhGraphQLUserContributionsNode {
+    #[serde(rename = "contributionsCollection")]
+    pub contributions_collection: GhGraphQLContributionsCollection,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct GhGraphQLContributionsCollection {
+    #[serde(rename = "commitContributionsByRepository")]
+    pub commit_contributions_by_repository: Vec<GhGraphQLContributionByRepo>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct GhGraphQLContributionByRepo {
+    pub repository: GhGraphQLRepoNode,
+    pub contributions: Option<GhGraphQLContributionCount>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct GhGraphQLContributionCount {
+    #[serde(rename = "totalCount")]
+    pub total_count: u64,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct GhGraphQLRepoNode {
+    #[serde(rename = "nameWithOwner")]
+    pub name_with_owner: String,
+    pub name: String,
+    pub owner: GhGraphQLOwnerNode,
+    #[serde(rename = "isPrivate", default)]
+    pub is_private: bool,
+    #[serde(rename = "isFork", default)]
+    pub is_fork: bool,
+    pub description: Option<String>,
+    pub url: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct GhGraphQLOwnerNode {
+    pub login: String,
+}
+
 impl GitHubGraphQLClient {
     pub fn new(client: HttpClient, token: Option<String>, endpoint: Option<String>) -> Self {
         Self {
@@ -120,5 +168,43 @@ impl GitHubGraphQLClient {
             provider: "GitHub GraphQL".to_string(),
             message: "Empty GraphQL data response".to_string(),
         })
+    }
+
+    pub async fn get_user_commit_contributions(
+        &self,
+        login: &str,
+    ) -> Result<Vec<GhGraphQLContributionByRepo>, SpoorError> {
+        let query = r#"
+            query($login: String!) {
+              user(login: $login) {
+                contributionsCollection {
+                  commitContributionsByRepository(maxRepositories: 50) {
+                    repository {
+                      nameWithOwner
+                      name
+                      owner { login }
+                      isPrivate
+                      isFork
+                      description
+                      url
+                    }
+                    contributions {
+                      totalCount
+                    }
+                  }
+                }
+              }
+            }
+        "#;
+
+        let variables = serde_json::json!({ "login": login });
+        let res: GhGraphQLUserContributions = self.query(query, variables).await?;
+        Ok(res
+            .user
+            .map(|u| {
+                u.contributions_collection
+                    .commit_contributions_by_repository
+            })
+            .unwrap_or_default())
     }
 }

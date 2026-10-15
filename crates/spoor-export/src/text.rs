@@ -218,7 +218,7 @@ pub fn export_text(report: &Report) -> Result<String, SpoorError> {
     writeln!(out, "{sub_divider}").unwrap();
     writeln!(
         out,
-        "Coverage: {} (Commits: {}, Repos: {}/{})",
+        "Coverage: {} (Commits: {}, Repos: {}/{}, Candidates: {}, Global Commits: {}, Git Inspect: {})",
         if report.coverage.is_partial {
             "PARTIAL"
         } else {
@@ -226,7 +226,14 @@ pub fn export_text(report: &Report) -> Result<String, SpoorError> {
         },
         report.coverage.commits_scanned,
         report.coverage.repositories_scanned,
-        report.coverage.repositories_total
+        report.coverage.repositories_total,
+        report.coverage.candidate_repositories_found,
+        report.coverage.global_commits_found,
+        if report.coverage.git_history_inspected {
+            "YES"
+        } else {
+            "NO"
+        }
     )
     .unwrap();
     for (provider, st) in &report.provider_status {

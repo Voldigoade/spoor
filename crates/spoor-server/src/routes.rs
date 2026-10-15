@@ -103,6 +103,18 @@ pub async fn create_lookup_handler(
             .into_response();
     }
 
+    // Validate target syntax before charging any rate-limit quota
+    let target = match Target::parse(&payload.target) {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiErrorResponse::new("invalid_target", e.to_string())),
+            )
+                .into_response();
+        }
+    };
+
     let client_ip = state.proxy_config.resolve_client_ip(addr.ip(), &headers);
 
     let rate_limit_res = {
@@ -126,17 +138,6 @@ pub async fn create_lookup_handler(
         )
             .into_response();
     }
-
-    let target = match Target::parse(&payload.target) {
-        Ok(t) => t,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiErrorResponse::new("invalid_target", e.to_string())),
-            )
-                .into_response();
-        }
-    };
 
     let id = Uuid::new_v4();
     let created_at = Utc::now();
@@ -167,13 +168,6 @@ pub async fn create_lookup_handler(
     let bg_bcast = broadcast_tx;
 
     tokio::spawn(async move {
-        {
-            let mut map = bg_state.lookups.write().await;
-            if let Some(e) = map.get_mut(&bg_id) {
-                e.status = LookupStatus::Running;
-            }
-        }
-
         let (mpsc_tx, mut mpsc_rx) = mpsc::channel::<SpoorEvent>(64);
         let bcast_forward = bg_bcast.clone();
         tokio::spawn(async move {
@@ -182,7 +176,15 @@ pub async fn create_lookup_handler(
             }
         });
 
+        // Wait for concurrency permit before transitioning to Running
         let _permit = bg_state.concurrency_semaphore.acquire().await;
+        {
+            let mut map = bg_state.lookups.write().await;
+            if let Some(e) = map.get_mut(&bg_id) {
+                e.status = LookupStatus::Running;
+            }
+        }
+
         let res = bg_state
             .engine
             .run_analysis(&bg_target, bg_options, Some(mpsc_tx))

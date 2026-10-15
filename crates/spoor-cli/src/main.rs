@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use clap::Parser;
 use spoor_core::{
-    AnalysisMode, CacheStore, Report, SpoorError, SpoorEvent, SqliteCacheStore, Target,
+    AnalysisMode, AnalysisOptions, CacheStore, Report, SpoorError, SpoorEvent, SqliteCacheStore,
+    Target,
 };
 use spoor_export::{export_bytes, ExportFormat};
 use spoor_providers::{AnalysisEngine, GitHubProvider, GitLeakClient, HttpClient};
@@ -52,38 +53,61 @@ async fn main() {
         cache.clone(),
     ));
 
+    if let Some(target) = cli.target {
+        let options = match resolve_options(cli.mode.as_deref(), cli.deep, cli.enrich) {
+            Ok(opts) => opts,
+            Err(e) => {
+                eprintln!("{}: {}", red("[error]"), e);
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = run_inspect(engine, &target, options, cli.format, cli.output).await {
+            eprintln!("{}: {}", red("[error]"), e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
     match cli.command {
         None => {
             run_repl(engine, cache).await;
         }
         Some(Commands::Inspect {
             target,
+            mode,
             deep,
+            enrich,
             format,
             output,
         }) => {
-            let mode = if deep {
-                AnalysisMode::Deep
-            } else {
-                AnalysisMode::Fast
+            let options = match resolve_options(mode.as_deref(), deep, enrich) {
+                Ok(opts) => opts,
+                Err(e) => {
+                    eprintln!("{}: {}", red("[error]"), e);
+                    std::process::exit(1);
+                }
             };
-            if let Err(e) = run_inspect(engine, &target, mode, format, output).await {
+            if let Err(e) = run_inspect(engine, &target, options, format, output).await {
                 eprintln!("{}: {}", red("[error]"), e);
                 std::process::exit(1);
             }
         }
         Some(Commands::User {
             username,
+            mode,
             deep,
+            enrich,
             format,
             output,
         }) => {
-            let mode = if deep {
-                AnalysisMode::Deep
-            } else {
-                AnalysisMode::Fast
+            let options = match resolve_options(mode.as_deref(), deep, enrich) {
+                Ok(opts) => opts,
+                Err(e) => {
+                    eprintln!("{}: {}", red("[error]"), e);
+                    std::process::exit(1);
+                }
             };
-            if let Err(e) = run_inspect(engine, &username, mode, format, output).await {
+            if let Err(e) = run_inspect(engine, &username, options, format, output).await {
                 eprintln!("{}: {}", red("[error]"), e);
                 std::process::exit(1);
             }
@@ -93,7 +117,8 @@ async fn main() {
             format,
             output,
         }) => {
-            if let Err(e) = run_inspect(engine, &repo, AnalysisMode::Fast, format, output).await {
+            let options = AnalysisOptions::fast();
+            if let Err(e) = run_inspect(engine, &repo, options, format, output).await {
                 eprintln!("{}: {}", red("[error]"), e);
                 std::process::exit(1);
             }
@@ -191,10 +216,40 @@ async fn main() {
     }
 }
 
+fn resolve_options(
+    mode_arg: Option<&str>,
+    deep_flag: bool,
+    enrich_flag: bool,
+) -> Result<AnalysisOptions, SpoorError> {
+    let mode = if deep_flag {
+        AnalysisMode::Deep
+    } else if let Some(m) = mode_arg {
+        match m.to_lowercase().as_str() {
+            "fast" => AnalysisMode::Fast,
+            "deep" => AnalysisMode::Deep,
+            other => {
+                return Err(SpoorError::Config(format!(
+                    "Invalid analysis mode '{other}'. Supported modes: fast, deep"
+                )));
+            }
+        }
+    } else {
+        AnalysisMode::Fast
+    };
+
+    let enrich = if enrich_flag {
+        true
+    } else {
+        mode == AnalysisMode::Deep
+    };
+
+    Ok(AnalysisOptions { mode, enrich })
+}
+
 async fn run_inspect(
     engine: Arc<AnalysisEngine>,
     raw_target: &str,
-    mode: AnalysisMode,
+    options: AnalysisOptions,
     format_arg: Option<String>,
     output_arg: Option<String>,
 ) -> Result<(), SpoorError> {
@@ -211,7 +266,7 @@ async fn run_inspect(
         }
     });
 
-    let report = engine.run_analysis(&target, mode, Some(tx)).await?;
+    let report = engine.run_analysis(&target, options, Some(tx)).await?;
     let _ = event_printer.await;
 
     if let Some(fmt_str) = format_arg {

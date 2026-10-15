@@ -6,11 +6,36 @@ use clap::{Parser, Subcommand};
     version,
     author = "Voldigoade",
     about = "Terminal-first GitHub public-footprint inspection tool",
-    long_about = "Spoor inspects publicly accessible GitHub metadata, commit headers, and public keys to construct sourced, structured reports with complete provenance."
+    long_about = "Spoor inspects publicly accessible GitHub metadata, commit headers, public keys, and repository history to construct sourced, structured reports with complete provenance.",
+    after_help = "EXAMPLES:\n    spoor torvalds\n    spoor inspect Voldigoade --mode deep --format markdown -o report.md\n    spoor inspect rust-lang/rust\n    spoor serve --bind 127.0.0.1 --port 8080"
 )]
 pub struct Cli {
     #[arg(long, global = true, help = "Disable ANSI color formatting")]
     pub no_color: bool,
+
+    /// Target to inspect directly (e.g. `spoor torvalds`)
+    #[arg(value_name = "TARGET")]
+    pub target: Option<String>,
+
+    /// Analysis mode: fast (bounded API scan) or deep (commit discovery, bare git clone history)
+    #[arg(long, short = 'm', value_name = "MODE")]
+    pub mode: Option<String>,
+
+    /// Enable DEEP mode (alias for --mode deep)
+    #[arg(long, short = 'd')]
+    pub deep: bool,
+
+    /// Enable third-party enrichment (e.g. GitLeak)
+    #[arg(long)]
+    pub enrich: bool,
+
+    /// Export format (text, json, markdown, pdf, svg)
+    #[arg(long, short = 'f', value_name = "FORMAT")]
+    pub format: Option<String>,
+
+    /// Output destination file path
+    #[arg(long, short = 'o', value_name = "PATH")]
+    pub output: Option<String>,
 
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -20,19 +45,27 @@ pub struct Cli {
 pub enum Commands {
     /// Inspect a GitHub target (username, profile URL, repo shorthand, or repo URL)
     Inspect {
-        /// Target identifier or URL
+        /// Target identifier or URL (e.g. torvalds, rust-lang/rust, https://github.com/torvalds)
         target: String,
 
-        /// Enable DEEP mode (wider commit sampling and GitLeak enrichment)
+        /// Analysis mode: fast or deep
+        #[arg(long, short = 'm', value_name = "MODE")]
+        mode: Option<String>,
+
+        /// Enable DEEP mode (alias for --mode deep)
         #[arg(long, short = 'd')]
         deep: bool,
 
-        /// Export format (json, md, txt, svg, pdf)
-        #[arg(long, short = 'f')]
+        /// Enable third-party enrichment (e.g. GitLeak)
+        #[arg(long)]
+        enrich: bool,
+
+        /// Export format (text, json, markdown, pdf, svg)
+        #[arg(long, short = 'f', value_name = "FORMAT")]
         format: Option<String>,
 
         /// Destination file path
-        #[arg(long, short = 'o')]
+        #[arg(long, short = 'o', value_name = "PATH")]
         output: Option<String>,
     },
 
@@ -41,16 +74,24 @@ pub enum Commands {
         /// GitHub username or profile URL
         username: String,
 
+        /// Analysis mode: fast or deep
+        #[arg(long, short = 'm', value_name = "MODE")]
+        mode: Option<String>,
+
         /// Enable DEEP mode
         #[arg(long, short = 'd')]
         deep: bool,
 
-        /// Export format (json, md, txt, svg, pdf)
-        #[arg(long, short = 'f')]
+        /// Enable third-party enrichment (e.g. GitLeak)
+        #[arg(long)]
+        enrich: bool,
+
+        /// Export format (text, json, markdown, pdf, svg)
+        #[arg(long, short = 'f', value_name = "FORMAT")]
         format: Option<String>,
 
         /// Destination file path
-        #[arg(long, short = 'o')]
+        #[arg(long, short = 'o', value_name = "PATH")]
         output: Option<String>,
     },
 
@@ -59,12 +100,12 @@ pub enum Commands {
         /// Repository in owner/repo shorthand or full GitHub URL
         repo: String,
 
-        /// Export format (json, md, txt, svg, pdf)
-        #[arg(long, short = 'f')]
+        /// Export format (text, json, markdown, pdf, svg)
+        #[arg(long, short = 'f', value_name = "FORMAT")]
         format: Option<String>,
 
         /// Destination file path
-        #[arg(long, short = 'o')]
+        #[arg(long, short = 'o', value_name = "PATH")]
         output: Option<String>,
     },
 
@@ -73,12 +114,12 @@ pub enum Commands {
         /// Path to input report JSON file
         file: String,
 
-        /// Desired format: json, md, txt, svg, pdf
-        #[arg(long, short = 'f')]
+        /// Desired format: text, json, markdown, pdf, svg
+        #[arg(long, short = 'f', value_name = "FORMAT")]
         format: String,
 
         /// Output file path (defaults to auto-generated filename)
-        #[arg(long, short = 'o')]
+        #[arg(long, short = 'o', value_name = "PATH")]
         output: Option<String>,
     },
 

@@ -11,10 +11,12 @@ use spoor_core::{
 };
 use tokio::sync::mpsc::Sender;
 
-use crate::github::models::{GhCommitItem, GhRepo};
+use crate::git::GitInspector;
+use crate::github::models::{GhCommitActor, GhCommitDetail, GhCommitItem, GhVerification};
 use crate::github::GitHubProvider;
 use crate::gitleak::{GitLeakBudget, GitLeakClient, GitLeakOutcome, GitLeakResponse};
 use crate::hygiene::detect_hygiene_from_paths;
+use tracing::debug;
 
 fn extract_repo_from_commit_url(url: &str) -> Option<String> {
     let stripped = url
@@ -33,6 +35,20 @@ fn extract_repo_from_commit_url(url: &str) -> Option<String> {
 }
 
 type ScannedRepoMeta = (Option<HashMap<String, u64>>, Option<RepoHygiene>);
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct CandidateRepoEntry {
+    owner: String,
+    name: String,
+    full_name: String,
+    html_url: String,
+    is_fork: bool,
+    description: Option<String>,
+    default_branch: Option<String>,
+    sources: Vec<String>,
+    commit_matches: usize,
+}
 
 pub struct AnalysisEngine {
     github: GitHubProvider,
@@ -263,6 +279,12 @@ impl AnalysisEngine {
             AnalysisMode::Deep => 100,
         };
 
+        let mut candidate_map: HashMap<String, CandidateRepoEntry> = HashMap::new();
+        let mut raw_commits: Vec<(String, GhCommitItem)> = Vec::new();
+        let mut global_search_commits_count = 0usize;
+        let mut git_inspected = false;
+        let mut repos_scanned_count = 0usize;
+
         Self::emit(
             event_tx,
             SpoorEvent::ProviderStarted {
@@ -272,96 +294,526 @@ impl AnalysisEngine {
         )
         .await;
 
-        let gh_repos = self
+        let repos_res = self
             .github
             .fetch_user_repositories(username, max_repos)
-            .await
-            .unwrap_or_default();
+            .await;
+        let gh_repos = match repos_res {
+            Ok(repos) => {
+                Self::emit(
+                    event_tx,
+                    SpoorEvent::ProviderCompleted {
+                        provider: "GitHub REST".to_string(),
+                        details: format!("Retrieved {} repositories", repos.len()),
+                    },
+                )
+                .await;
+
+                report.provider_status.insert(
+                    "GitHub Repositories".to_string(),
+                    ProviderStatus {
+                        status: ProviderHealth::Ok,
+                        latency_ms: None,
+                        items_retrieved: Some(repos.len()),
+                        rate_limit_remaining: Some(self.github.rest.rate_limit_remaining()),
+                        rate_limit_reset: None,
+                        retry_after_seconds: None,
+                        message: None,
+                    },
+                );
+
+                for r in &repos {
+                    let entry = candidate_map.entry(r.full_name.clone()).or_insert_with(|| {
+                        CandidateRepoEntry {
+                            owner: username.to_string(),
+                            name: r.name.clone(),
+                            full_name: r.full_name.clone(),
+                            html_url: r.html_url.clone(),
+                            is_fork: r.fork,
+                            description: r.description.clone(),
+                            default_branch: r.default_branch.clone(),
+                            sources: Vec::new(),
+                            commit_matches: 0,
+                        }
+                    });
+                    if entry.default_branch.is_none() {
+                        entry.default_branch = r.default_branch.clone();
+                    }
+                    if !entry.sources.contains(&"Owned".to_string()) {
+                        entry.sources.push("Owned".to_string());
+                    }
+                }
+                repos
+            }
+            Err(e) => {
+                let health = match &e {
+                    SpoorError::RateLimitExceeded { .. } => ProviderHealth::RateLimited,
+                    SpoorError::Timeout { .. } => ProviderHealth::Unavailable,
+                    _ => ProviderHealth::Partial,
+                };
+                report.provider_status.insert(
+                    "GitHub Repositories".to_string(),
+                    ProviderStatus {
+                        status: health,
+                        latency_ms: None,
+                        items_retrieved: Some(0),
+                        rate_limit_remaining: Some(self.github.rest.rate_limit_remaining()),
+                        rate_limit_reset: None,
+                        retry_after_seconds: None,
+                        message: Some(e.to_string()),
+                    },
+                );
+                report
+                    .warnings
+                    .push(format!("Failed to retrieve owned repositories: {e}"));
+                Vec::new()
+            }
+        };
 
         Self::emit(
             event_tx,
-            SpoorEvent::ProviderCompleted {
-                provider: "GitHub REST".to_string(),
-                details: format!("Retrieved {} repositories", gh_repos.len()),
+            SpoorEvent::ProviderStarted {
+                provider: "GitHub Commit Search".to_string(),
+                operation: format!("Searching global commits authored by {username}"),
             },
         )
         .await;
 
+        let search_query = format!("author:{username}");
+        let max_search_pages = match options.mode {
+            AnalysisMode::Fast => 1,
+            AnalysisMode::Deep => 3,
+        };
+
+        let mut search_succeeded = false;
+        let mut search_error_msg = None;
+
+        for page in 1..=max_search_pages {
+            match self.github.search_commits(&search_query, page, 100).await {
+                Ok(res) => {
+                    search_succeeded = true;
+                    global_search_commits_count += res.items.len();
+                    for item in res.items {
+                        let repo_full_name = item.repository.full_name.clone();
+                        let parts: Vec<&str> = repo_full_name.split('/').collect();
+                        let (owner, name) = if parts.len() == 2 {
+                            (parts[0].to_string(), parts[1].to_string())
+                        } else {
+                            (username.to_string(), item.repository.name.clone())
+                        };
+
+                        let entry =
+                            candidate_map
+                                .entry(repo_full_name.clone())
+                                .or_insert_with(|| CandidateRepoEntry {
+                                    owner,
+                                    name,
+                                    full_name: repo_full_name.clone(),
+                                    html_url: item.repository.html_url.clone(),
+                                    is_fork: item.repository.fork,
+                                    description: item.repository.description.clone(),
+                                    default_branch: None,
+                                    sources: Vec::new(),
+                                    commit_matches: 0,
+                                });
+                        entry.commit_matches += 1;
+                        if !entry.sources.contains(&"Commit Search".to_string()) {
+                            entry.sources.push("Commit Search".to_string());
+                        }
+
+                        raw_commits.push((
+                            repo_full_name,
+                            GhCommitItem {
+                                sha: item.sha,
+                                html_url: item.html_url,
+                                commit: item.commit,
+                                author: item.author,
+                                committer: item.committer,
+                            },
+                        ));
+                    }
+                    if res.incomplete_results || res.total_count <= (page * 100) as u64 {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    search_error_msg = Some(e.to_string());
+                    break;
+                }
+            }
+        }
+
+        let search_status = if search_succeeded {
+            ProviderHealth::Ok
+        } else if let Some(ref msg) = search_error_msg {
+            if msg.contains("Rate limit") || msg.contains("rate limit") {
+                ProviderHealth::RateLimited
+            } else {
+                ProviderHealth::Partial
+            }
+        } else {
+            ProviderHealth::Ok
+        };
+
         report.provider_status.insert(
-            "GitHub Repositories".to_string(),
+            "GitHub Commit Search".to_string(),
             ProviderStatus {
-                status: ProviderHealth::Ok,
+                status: search_status,
                 latency_ms: None,
-                items_retrieved: Some(gh_repos.len()),
+                items_retrieved: Some(global_search_commits_count),
                 rate_limit_remaining: Some(self.github.rest.rate_limit_remaining()),
                 rate_limit_reset: None,
                 retry_after_seconds: None,
-                message: None,
+                message: search_error_msg.clone(),
             },
         );
+        if let Some(ref err) = search_error_msg {
+            report
+                .warnings
+                .push(format!("GitHub commit search encountered an issue: {err}"));
+        }
 
-        let (repo_scan_limit, commit_per_repo_limit) = match options.mode {
-            AnalysisMode::Fast => (3, 30),
-            AnalysisMode::Deep => (8, 50),
+        if self.github.is_authenticated() {
+            Self::emit(
+                event_tx,
+                SpoorEvent::ProviderStarted {
+                    provider: "GitHub GraphQL".to_string(),
+                    operation: format!("Querying contributed repositories for {username}"),
+                },
+            )
+            .await;
+
+            match self.github.fetch_user_contributions(username).await {
+                Ok(contribs) => {
+                    report.provider_status.insert(
+                        "GitHub Contributions (GraphQL)".to_string(),
+                        ProviderStatus {
+                            status: ProviderHealth::Ok,
+                            latency_ms: None,
+                            items_retrieved: Some(contribs.len()),
+                            rate_limit_remaining: None,
+                            rate_limit_reset: None,
+                            retry_after_seconds: None,
+                            message: None,
+                        },
+                    );
+                    for c in contribs {
+                        if !c.repository.is_private {
+                            let repo_full_name = c.repository.name_with_owner.clone();
+                            let entry =
+                                candidate_map
+                                    .entry(repo_full_name.clone())
+                                    .or_insert_with(|| CandidateRepoEntry {
+                                        owner: c.repository.owner.login.clone(),
+                                        name: c.repository.name.clone(),
+                                        full_name: repo_full_name,
+                                        html_url: c.repository.url.clone(),
+                                        is_fork: c.repository.is_fork,
+                                        description: c.repository.description.clone(),
+                                        default_branch: None,
+                                        sources: Vec::new(),
+                                        commit_matches: 0,
+                                    });
+                            if !entry.sources.contains(&"Contribution".to_string()) {
+                                entry.sources.push("Contribution".to_string());
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    report.provider_status.insert(
+                        "GitHub Contributions (GraphQL)".to_string(),
+                        ProviderStatus {
+                            status: ProviderHealth::Partial,
+                            latency_ms: None,
+                            items_retrieved: Some(0),
+                            rate_limit_remaining: None,
+                            rate_limit_reset: None,
+                            retry_after_seconds: None,
+                            message: Some(e.to_string()),
+                        },
+                    );
+                    report
+                        .warnings
+                        .push(format!("GraphQL contributions query failed: {e}"));
+                }
+            }
+        } else {
+            report.provider_status.insert(
+                "GitHub Contributions (GraphQL)".to_string(),
+                ProviderStatus {
+                    status: ProviderHealth::Skipped,
+                    latency_ms: None,
+                    items_retrieved: None,
+                    rate_limit_remaining: None,
+                    rate_limit_reset: None,
+                    retry_after_seconds: None,
+                    message: Some("GraphQL requires authenticated GITHUB_TOKEN".to_string()),
+                },
+            );
+        }
+
+        Self::emit(
+            event_tx,
+            SpoorEvent::ProviderStarted {
+                provider: "GitHub Events".to_string(),
+                operation: format!("Fetching public events for {username}"),
+            },
+        )
+        .await;
+
+        let events_res = self.github.fetch_user_events(username, 100).await;
+        let events = match events_res {
+            Ok(evs) => {
+                report.provider_status.insert(
+                    "GitHub Events".to_string(),
+                    ProviderStatus {
+                        status: ProviderHealth::Ok,
+                        latency_ms: None,
+                        items_retrieved: Some(evs.len()),
+                        rate_limit_remaining: Some(self.github.rest.rate_limit_remaining()),
+                        rate_limit_reset: None,
+                        retry_after_seconds: None,
+                        message: None,
+                    },
+                );
+                for ev in &evs {
+                    let repo_name = ev.repo.name.clone();
+                    let parts: Vec<&str> = repo_name.split('/').collect();
+                    if parts.len() == 2 {
+                        let entry = candidate_map.entry(repo_name.clone()).or_insert_with(|| {
+                            CandidateRepoEntry {
+                                owner: parts[0].to_string(),
+                                name: parts[1].to_string(),
+                                full_name: repo_name.clone(),
+                                html_url: format!("https://github.com/{repo_name}"),
+                                is_fork: false,
+                                description: None,
+                                default_branch: None,
+                                sources: Vec::new(),
+                                commit_matches: 0,
+                            }
+                        });
+                        if !entry.sources.contains(&"Recent Activity".to_string()) {
+                            entry.sources.push("Recent Activity".to_string());
+                        }
+                    }
+                }
+                evs
+            }
+            Err(e) => {
+                report.provider_status.insert(
+                    "GitHub Events".to_string(),
+                    ProviderStatus {
+                        status: ProviderHealth::Partial,
+                        latency_ms: None,
+                        items_retrieved: Some(0),
+                        rate_limit_remaining: Some(self.github.rest.rate_limit_remaining()),
+                        rate_limit_reset: None,
+                        retry_after_seconds: None,
+                        message: Some(e.to_string()),
+                    },
+                );
+                report
+                    .warnings
+                    .push(format!("Failed to retrieve public events: {e}"));
+                Vec::new()
+            }
         };
 
-        // Filter non-fork repositories first for commit and hygiene analysis
-        let mut eligible_repos: Vec<&GhRepo> = gh_repos.iter().filter(|r| !r.fork).collect();
-        if eligible_repos.is_empty() {
-            eligible_repos = gh_repos.iter().collect();
-        }
-        eligible_repos.truncate(repo_scan_limit);
+        let mut candidate_list: Vec<CandidateRepoEntry> = candidate_map.values().cloned().collect();
+        candidate_list.sort_by_key(|c| {
+            let mut score = 0i32;
+            if c.owner.eq_ignore_ascii_case(username) {
+                score += 100;
+            }
+            if !c.is_fork {
+                score += 50;
+            }
+            score += (c.commit_matches as i32) * 10;
+            if c.sources.contains(&"Contribution".to_string()) {
+                score += 40;
+            }
+            if c.sources.contains(&"Recent Activity".to_string()) {
+                score += 20;
+            }
+            std::cmp::Reverse(score)
+        });
 
-        let mut raw_commits: Vec<(String, GhCommitItem)> = Vec::new();
-        let mut repos_scanned_count = 0;
+        let (candidate_scan_limit, commit_per_repo_limit) = match options.mode {
+            AnalysisMode::Fast => (5, 50),
+            AnalysisMode::Deep => (15, 100),
+        };
+
+        let eligible_candidates: Vec<CandidateRepoEntry> = candidate_list
+            .into_iter()
+            .take(candidate_scan_limit)
+            .collect();
+
         let mut scanned_repo_meta: HashMap<String, ScannedRepoMeta> = HashMap::new();
 
-        for (idx, r) in eligible_repos.iter().enumerate() {
+        for (idx, r) in eligible_candidates.iter().enumerate() {
             Self::emit(
                 event_tx,
                 SpoorEvent::ScanProgress {
                     current: idx + 1,
-                    total: eligible_repos.len(),
+                    total: eligible_candidates.len(),
                     message: format!("Inspecting repository {}", r.full_name),
                 },
             )
             .await;
 
-            let commits = self
+            let commits_res = self
                 .github
-                .fetch_repository_commits(username, &r.name, commit_per_repo_limit)
-                .await
-                .unwrap_or_default();
+                .fetch_repository_commits(&r.owner, &r.name, commit_per_repo_limit)
+                .await;
 
-            if !commits.is_empty() {
-                repos_scanned_count += 1;
-                for c in commits {
-                    raw_commits.push((r.full_name.clone(), c));
+            if let Ok(commits) = commits_res {
+                if !commits.is_empty() {
+                    repos_scanned_count += 1;
+                    for c in commits {
+                        raw_commits.push((r.full_name.clone(), c));
+                    }
                 }
             }
 
             let langs = self
                 .github
-                .fetch_repository_languages(username, &r.name)
+                .fetch_repository_languages(&r.owner, &r.name)
                 .await
                 .ok();
 
-            let default_branch = r.default_branch.as_deref().unwrap_or("main");
-            let tree = self
+            let default_branch = r.default_branch.as_deref().unwrap_or("HEAD");
+            let tree_res = self
                 .github
-                .fetch_repository_tree(username, &r.name, default_branch)
-                .await
-                .unwrap_or_default();
+                .fetch_repository_tree(&r.owner, &r.name, default_branch)
+                .await;
 
-            let hygiene = if !tree.tree.is_empty() {
-                Some(detect_hygiene_from_paths(
+            let hygiene = match tree_res {
+                Ok(tree) if !tree.tree.is_empty() => Some(detect_hygiene_from_paths(
                     tree.tree.iter().map(|item| item.path.as_str()),
-                ))
-            } else {
-                None
+                )),
+                _ => None,
             };
 
             scanned_repo_meta.insert(r.full_name.clone(), (langs, hygiene));
+        }
+
+        if options.mode == AnalysisMode::Deep {
+            if GitInspector::is_git_available().await {
+                Self::emit(
+                    event_tx,
+                    SpoorEvent::ProviderStarted {
+                        provider: "Git History Inspection".to_string(),
+                        operation: "Cloning bare repository metadata for deep history scan"
+                            .to_string(),
+                    },
+                )
+                .await;
+
+                let git_inspector = GitInspector::default();
+                let mut git_commits_found = 0usize;
+                let git_candidates: Vec<_> = eligible_candidates
+                    .iter()
+                    .filter(|c| c.owner.eq_ignore_ascii_case(username) || c.commit_matches > 0)
+                    .take(5)
+                    .collect();
+
+                for candidate in &git_candidates {
+                    match git_inspector
+                        .inspect_repo_history(&candidate.owner, &candidate.name, 500)
+                        .await
+                    {
+                        Ok(git_commits) => {
+                            git_commits_found += git_commits.len();
+                            for gc in git_commits {
+                                raw_commits.push((
+                                    gc.repository.clone(),
+                                    GhCommitItem {
+                                        sha: gc.sha.clone(),
+                                        html_url: format!(
+                                            "https://github.com/{}/{}/commit/{}",
+                                            candidate.owner, candidate.name, gc.sha
+                                        ),
+                                        commit: GhCommitDetail {
+                                            author: Some(GhCommitActor {
+                                                name: gc.author_name,
+                                                email: gc.author_email,
+                                                date: gc.author_date,
+                                            }),
+                                            committer: Some(GhCommitActor {
+                                                name: gc.committer_name,
+                                                email: gc.committer_email,
+                                                date: gc.committer_date,
+                                            }),
+                                            message: gc.message_subject,
+                                            verification: if gc.is_verified {
+                                                Some(GhVerification {
+                                                    verified: true,
+                                                    reason: "valid".to_string(),
+                                                    signature: None,
+                                                })
+                                            } else {
+                                                None
+                                            },
+                                        },
+                                        author: None,
+                                        committer: None,
+                                    },
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            debug!(repo = %candidate.full_name, err = %e, "Git history inspection skipped for repository");
+                        }
+                    }
+                }
+
+                git_inspected = true;
+                report.provider_status.insert(
+                    "Git History".to_string(),
+                    ProviderStatus {
+                        status: ProviderHealth::Ok,
+                        latency_ms: None,
+                        items_retrieved: Some(git_commits_found),
+                        rate_limit_remaining: None,
+                        rate_limit_reset: None,
+                        retry_after_seconds: None,
+                        message: Some(format!(
+                            "Inspected {} candidate repositories via bare git clone",
+                            git_candidates.len()
+                        )),
+                    },
+                );
+            } else {
+                report.provider_status.insert(
+                    "Git History".to_string(),
+                    ProviderStatus {
+                        status: ProviderHealth::Skipped,
+                        latency_ms: None,
+                        items_retrieved: None,
+                        rate_limit_remaining: None,
+                        rate_limit_reset: None,
+                        retry_after_seconds: None,
+                        message: Some(
+                            "git command line tool not available in system PATH".to_string(),
+                        ),
+                    },
+                );
+            }
+        } else {
+            report.provider_status.insert(
+                "Git History".to_string(),
+                ProviderStatus {
+                    status: ProviderHealth::Skipped,
+                    latency_ms: None,
+                    items_retrieved: None,
+                    rate_limit_remaining: None,
+                    rate_limit_reset: None,
+                    retry_after_seconds: None,
+                    message: Some("Native git cloning excluded in FAST mode".to_string()),
+                },
+            );
         }
 
         let mut repo_reports = Vec::new();
@@ -492,11 +944,6 @@ impl AnalysisEngine {
             },
         );
 
-        let events = self
-            .github
-            .fetch_user_events(username, 100)
-            .await
-            .unwrap_or_default();
         let mut activity_report = ActivityReport {
             window_note: "Public event retention window is limited to events from the previous 30 days and up to 300 events by GitHub API.".to_string(),
             total_events_observed: events.len(),
@@ -719,10 +1166,8 @@ impl AnalysisEngine {
             );
         }
 
-        // 7. Identity Aggregation and Deduplication
         let mut identities_map: HashMap<String, IdentityRecord> = HashMap::new();
 
-        // A. Profile email
         if let Some(pub_email) = &profile_report.public_email {
             let email_clean = pub_email.trim().to_string();
             let email_type = classify_email(&email_clean, Some(&email_clean));
@@ -742,7 +1187,6 @@ impl AnalysisEngine {
             );
         }
 
-        // B. Commit metadata identities
         for (repo_full_name, item) in &raw_commits {
             let author = item.commit.author.as_ref();
             let committer = item.commit.committer.as_ref();
@@ -908,7 +1352,6 @@ impl AnalysisEngine {
             }
         }
 
-        // C. GitLeak identities
         if let Some(gl) = &gitleak_data {
             for email_entry in &gl.emails {
                 let norm = email_entry.email.trim().to_lowercase();
@@ -1021,7 +1464,6 @@ impl AnalysisEngine {
                 }
             }
 
-            // D. Timezone & Activity Heatmap Inferences
             if let Some(meta) = &gl.metadata {
                 if let Some(heatmap) = &meta.activity_heatmap {
                     if let Some(peak) = &heatmap.peak_activity {
@@ -1049,11 +1491,9 @@ impl AnalysisEngine {
             id.repositories.dedup();
         }
 
-        // Collect sorted identities
         let mut identities: Vec<IdentityRecord> = identities_map.into_values().collect();
         identities.sort_by_key(|b| std::cmp::Reverse(b.commits_observed));
 
-        // Top languages
         let mut sorted_langs: Vec<(String, u64)> = language_counts.into_iter().collect();
         sorted_langs.sort_by_key(|b| std::cmp::Reverse(b.1));
 
@@ -1069,13 +1509,15 @@ impl AnalysisEngine {
             0.0
         };
 
-        // Coverage accounting
         let is_partial = (repos_scanned_count < total_repos_count)
             || (gh_user.public_repos as usize > max_repos);
         report.coverage = CoverageRecord {
             commits_scanned: raw_commits.len(),
             repositories_scanned: repos_scanned_count,
             repositories_total: gh_user.public_repos as usize,
+            candidate_repositories_found: candidate_map.len(),
+            global_commits_found: global_search_commits_count,
+            git_history_inspected: git_inspected,
             is_partial,
             notes: Some(format!(
                 "Scanned {repos_scanned_count} of {} public repositories with a budget limit of {commit_per_repo_limit} commits per repo in {} mode",
@@ -1440,6 +1882,9 @@ impl AnalysisEngine {
             commits_scanned: commits.len(),
             repositories_scanned: 1,
             repositories_total: 1,
+            candidate_repositories_found: 1,
+            global_commits_found: 0,
+            git_history_inspected: false,
             is_partial: commits.len() >= commit_budget,
             notes: Some(format!(
                 "Scanned {} commits from target repository in {mode} mode",

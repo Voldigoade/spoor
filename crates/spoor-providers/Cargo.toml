@@ -18,6 +18,8 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 tokio-stream = { workspace = true }
+uuid = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 wiremock = "0.6"

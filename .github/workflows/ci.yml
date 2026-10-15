@@ -21,6 +21,7 @@ jobs:
           node-version: 24
       - run: node scripts/check-prose.mjs
       - run: cargo fmt --check
+      - run: npm --prefix packages/spoor-client run build
 
   clippy:
     name: Clippy Lint
@@ -44,6 +45,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace --all-features
       - run: cargo build --release
+
+  msrv:
+    name: MSRV Check (Rust 1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - run: cargo check --workspace --all-targets --all-features
 
   audit:
     name: Security Audit

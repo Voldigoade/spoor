@@ -168,3 +168,36 @@ pub struct GhTreeResponse {
     #[serde(default)]
     pub truncated: bool,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GhCommitSearchRepo {
+    pub id: u64,
+    pub name: String,
+    pub full_name: String,
+    pub html_url: String,
+    #[serde(default)]
+    pub private: bool,
+    #[serde(default)]
+    pub fork: bool,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GhSearchCommitItem {
+    pub sha: String,
+    pub html_url: String,
+    pub commit: GhCommitDetail,
+    pub author: Option<GhSimpleUser>,
+    pub committer: Option<GhSimpleUser>,
+    pub repository: GhCommitSearchRepo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct GhCommitSearchResult {
+    #[serde(default)]
+    pub total_count: u64,
+    #[serde(default)]
+    pub incomplete_results: bool,
+    #[serde(default)]
+    pub items: Vec<GhSearchCommitItem>,
+}

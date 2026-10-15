@@ -1,8 +1,4 @@
-/**
- * Spoor TypeScript Integration Client
- * Author: Voldigoade
- * Repository: https://github.com/Voldigoade/spoor
- */
+/** HTTP endpoint wrapper. Applications own polling recovery and cancellation. */
 export type AnalysisMode = 'fast' | 'deep';
 export type LookupStatus = 'pending' | 'running' | 'completed' | 'failed';
 export interface LookupMeta {
@@ -124,6 +120,9 @@ export interface CoverageRecord {
     commits_scanned: number;
     repositories_scanned: number;
     repositories_total: number;
+    candidate_repositories_found?: number;
+    global_commits_found?: number;
+    git_history_inspected?: boolean;
     is_partial: boolean;
     notes?: string;
 }

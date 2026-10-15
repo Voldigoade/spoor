@@ -1,4 +1,4 @@
-use spoor_core::{Report, SpoorError};
+use spoor_core::{ProviderHealth, Report, SpoorError};
 
 pub fn escape_xml(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -15,8 +15,38 @@ pub fn escape_xml(s: &str) -> String {
     out
 }
 
+pub fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.chars().count() <= max_len {
+        s.to_string()
+    } else {
+        let mut res: String = s.chars().take(max_len.saturating_sub(1)).collect();
+        res.push('\u{2026}');
+        res
+    }
+}
+
+fn short_provider_name(name: &str) -> &str {
+    if name.contains("REST") || name.contains("Repositories") {
+        "REST"
+    } else if name.contains("GraphQL") || name.contains("Contributions") {
+        "GraphQL"
+    } else if name.contains("Events") {
+        "Events"
+    } else if name.contains("Search") {
+        "Search"
+    } else if name.contains("Git History") || name.contains("Git") {
+        "Git"
+    } else if name.contains("GitLeak") {
+        "GitLeak"
+    } else if name.contains("Keys") {
+        "Keys"
+    } else {
+        name
+    }
+}
+
 pub fn export_svg(report: &Report) -> Result<String, SpoorError> {
-    let target_display = escape_xml(&report.target.display_name());
+    let target_display = escape_xml(&truncate_str(&report.target.display_name(), 40));
     let target_type = escape_xml(&report.summary.target_type);
     let mode = escape_xml(&report.mode.to_string().to_uppercase());
     let generated = escape_xml(
@@ -25,7 +55,7 @@ pub fn export_svg(report: &Report) -> Result<String, SpoorError> {
             .format("%Y-%m-%d %H:%M:%S UTC")
             .to_string(),
     );
-    let display_name = escape_xml(&report.summary.display_name);
+    let display_name = escape_xml(&truncate_str(&report.summary.display_name, 35));
 
     let total_stars = report.summary.total_stars_accumulated;
     let total_forks = report.summary.total_forks_accumulated;
@@ -33,59 +63,67 @@ pub fn export_svg(report: &Report) -> Result<String, SpoorError> {
     let distinct_emails = report.summary.distinct_emails_observed;
     let keys_count = report.summary.public_keys_found;
 
-    // Identities preview (up to 3)
     let mut id_rows = String::new();
     let mut y = 295;
     for id in report.identities.iter().take(3) {
-        let name = escape_xml(id.name.as_deref().unwrap_or("—"));
-        let email = escape_xml(&id.email);
+        let name = escape_xml(&truncate_str(id.name.as_deref().unwrap_or("-"), 24));
+        let email = escape_xml(&truncate_str(&id.email, 34));
         let email_type = escape_xml(id.email_type.as_str());
         id_rows.push_str(&format!(
             r##"<g transform="translate(40, {y})">
                 <rect width="420" height="48" rx="6" fill="#161b22" stroke="#30363d" />
-                <text x="16" y="20" fill="#f0f6fc" font-size="13" font-weight="600">{email}</text>
-                <text x="16" y="37" fill="#8b949e" font-size="11">{name} · {email_type}</text>
-                <text x="404" y="28" fill="#58a6ff" font-size="12" font-weight="600" text-anchor="end">{commits} cmt</text>
+                <text class="mono" x="16" y="20" fill="#f0f6fc" font-size="12" font-weight="600">{email}</text>
+                <text class="sans" x="16" y="37" fill="#8b949e" font-size="11">{name} · {email_type}</text>
+                <text class="mono" x="404" y="28" fill="#58a6ff" font-size="12" font-weight="600" text-anchor="end">{commits} cmt</text>
             </g>"##,
             commits = id.commits_observed
         ));
         y += 58;
     }
     if report.identities.is_empty() {
-        id_rows.push_str(r##"<text x="40" y="310" fill="#8b949e" font-size="13">No public commit or profile emails observed</text>"##);
+        id_rows.push_str(r##"<text class="sans" x="40" y="310" fill="#8b949e" font-size="13">No public commit or profile emails observed</text>"##);
     }
 
-    // Top repos preview (up to 3)
     let mut repo_rows = String::new();
     let mut ry = 295;
     for r in report.repositories.iter().take(3) {
-        let rname = escape_xml(&r.name);
-        let lang = escape_xml(r.primary_language.as_deref().unwrap_or("—"));
+        let rname = escape_xml(&truncate_str(&r.name, 30));
+        let lang = escape_xml(&truncate_str(
+            r.primary_language.as_deref().unwrap_or("-"),
+            16,
+        ));
         repo_rows.push_str(&format!(
             r##"<g transform="translate(500, {ry})">
                 <rect width="420" height="48" rx="6" fill="#161b22" stroke="#30363d" />
-                <text x="16" y="20" fill="#58a6ff" font-size="13" font-weight="600">{rname}</text>
-                <text x="16" y="37" fill="#8b949e" font-size="11">Language: {lang}</text>
-                <text x="404" y="28" fill="#f0f6fc" font-size="12" text-anchor="end">★ {stars}</text>
+                <text class="sans" x="16" y="20" fill="#58a6ff" font-size="13" font-weight="600">{rname}</text>
+                <text class="sans" x="16" y="37" fill="#8b949e" font-size="11">Language: {lang}</text>
+                <text class="mono" x="404" y="28" fill="#f0f6fc" font-size="12" text-anchor="end">* {stars}</text>
             </g>"##,
             stars = r.stars
         ));
         ry += 58;
     }
     if report.repositories.is_empty() {
-        repo_rows.push_str(r##"<text x="500" y="310" fill="#8b949e" font-size="13">No public repositories cataloged</text>"##);
+        repo_rows.push_str(r##"<text class="sans" x="500" y="310" fill="#8b949e" font-size="13">No public repositories cataloged</text>"##);
     }
 
-    // Provider status badges
     let mut status_badges = String::new();
     let mut sx = 500;
     for (name, status) in report.provider_status.iter().take(4) {
-        let p_name = escape_xml(name);
+        let short_name = escape_xml(short_provider_name(name));
         let p_status = escape_xml(&status.status.to_string());
+        let fill_color = match status.status {
+            ProviderHealth::Ok => "#238636",
+            ProviderHealth::Partial | ProviderHealth::RateLimited => "#9e6a03",
+            ProviderHealth::Skipped => "#30363d",
+            _ => "#da3633",
+        };
         status_badges.push_str(&format!(
             r##"<g transform="translate({sx}, 490)">
-                <rect width="98" height="24" rx="4" fill="#21262d" />
-                <text x="49" y="16" fill="#c9d1d9" font-size="10" font-weight="500" text-anchor="middle">{p_name}: {p_status}</text>
+                <rect width="98" height="24" rx="4" fill="#21262d" stroke="#30363d" stroke-width="1" />
+                <circle cx="12" cy="12" r="4" fill="{fill_color}" />
+                <text class="sans" x="22" y="16" fill="#c9d1d9" font-size="10" font-weight="500">{short_name}</text>
+                <text class="sans" x="90" y="16" fill="#8b949e" font-size="9" text-anchor="end">{p_status}</text>
             </g>"##
         ));
         sx += 106;
@@ -100,7 +138,6 @@ pub fn export_svg(report: &Report) -> Result<String, SpoorError> {
     <rect width="960" height="560" fill="#0d1117" rx="12" />
     <rect x="1" y="1" width="958" height="558" fill="none" stroke="#30363d" stroke-width="1" rx="11" />
 
-    <!-- Top Bar -->
     <g transform="translate(40, 40)">
         <text class="sans" x="0" y="24" fill="#58a6ff" font-size="22" font-weight="700" letter-spacing="1">SPOOR</text>
         <text class="sans" x="90" y="24" fill="#8b949e" font-size="13">by Voldigoade</text>
@@ -108,13 +145,11 @@ pub fn export_svg(report: &Report) -> Result<String, SpoorError> {
         <text class="mono" x="835" y="21" fill="#58a6ff" font-size="11" font-weight="600" text-anchor="middle">{mode}</text>
     </g>
 
-    <!-- Target Title Header -->
     <g transform="translate(40, 90)">
         <text class="sans" x="0" y="26" fill="#f0f6fc" font-size="24" font-weight="600">{target_display}</text>
         <text class="sans" x="0" y="46" fill="#8b949e" font-size="13">{display_name} · {target_type} · Generated: {generated}</text>
     </g>
 
-    <!-- Metrics Grid -->
     <g transform="translate(40, 160)">
         <rect width="168" height="74" rx="8" fill="#161b22" stroke="#30363d" />
         <text class="sans" x="16" y="26" fill="#8b949e" font-size="11" font-weight="500">PUBLIC REPOSITORIES</text>
@@ -137,19 +172,15 @@ pub fn export_svg(report: &Report) -> Result<String, SpoorError> {
         <text class="mono" x="752" y="55" fill="#f0f6fc" font-size="20" font-weight="600">{keys_count}</text>
     </g>
 
-    <!-- Column Headers -->
     <text class="sans" x="40" y="275" fill="#8b949e" font-size="12" font-weight="600">PUBLIC IDENTITIES (SAMPLED)</text>
     <text class="sans" x="500" y="275" fill="#8b949e" font-size="12" font-weight="600">REPOSITORIES</text>
 
-    <!-- Rows -->
     {id_rows}
     {repo_rows}
 
-    <!-- Provider Statuses -->
     <text class="sans" x="500" y="480" fill="#8b949e" font-size="11" font-weight="600">PROVIDER RECONNAISSANCE STATUS</text>
     {status_badges}
 
-    <!-- Footer -->
     <line x1="40" y1="525" x2="920" y2="525" stroke="#21262d" />
     <text class="sans" x="40" y="545" fill="#6e7681" font-size="11">Spoor public GitHub footprint exploration · Sourced &amp; provenance-backed facts</text>
     <text class="sans" x="920" y="545" fill="#6e7681" font-size="11" text-anchor="end">Spoor by Voldigoade</text>
@@ -179,5 +210,33 @@ mod tests {
         assert!(svg.contains("Spoor by Voldigoade"));
         assert!(svg.contains("Linus &amp; Friends &lt;linux&gt;"));
         assert!(!svg.contains("<linux>"));
+    }
+
+    #[test]
+    fn handles_long_strings_without_corrupting_svg() {
+        let mut report = Report::new(
+            Target::User {
+                username: "a-very-long-github-username-that-would-otherwise-overflow".into(),
+            },
+            AnalysisMode::Fast,
+        );
+        report.summary.display_name =
+            "A Extremely Long Display Name Designed To Test Boundary Checks Inside SVG Exporter"
+                .into();
+        report.identities.push(spoor_core::IdentityRecord {
+            name: Some("Long Contributor Name With Many Characters".into()),
+            email: "extremely.long.email.address.associated.with.corporate.entity@subdomain.example.com".into(),
+            email_type: spoor_core::EmailType::DomainEmail,
+            first_seen: None,
+            last_seen: None,
+            commits_observed: 42,
+            repositories: vec!["long-repo-name".into()],
+            sources: vec!["Git".into()],
+            is_verified_signer: true,
+        });
+
+        let svg = export_svg(&report).unwrap();
+        assert!(svg.contains("<svg"));
+        assert!(svg.contains("</svg>"));
     }
 }
