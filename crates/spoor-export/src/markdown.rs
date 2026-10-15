@@ -25,7 +25,6 @@ pub fn export_markdown(report: &Report) -> Result<String, SpoorError> {
     .unwrap();
     writeln!(out, "| **Schema Version** | {} |\n", report.schema_version).unwrap();
 
-    // Summary section
     writeln!(out, "## Summary\n").unwrap();
     writeln!(out, "- **Display Name:** {}", report.summary.display_name).unwrap();
     writeln!(out, "- **Target Type:** {}", report.summary.target_type).unwrap();
@@ -90,7 +89,6 @@ pub fn export_markdown(report: &Report) -> Result<String, SpoorError> {
         writeln!(out).unwrap();
     }
 
-    // Profile section
     if let Some(prof) = &report.profile {
         writeln!(out, "## Public Profile\n").unwrap();
         writeln!(out, "| Field | Information |").unwrap();
@@ -127,7 +125,6 @@ pub fn export_markdown(report: &Report) -> Result<String, SpoorError> {
         writeln!(out, "| Account Age | {} days |\n", prof.account_age_days).unwrap();
     }
 
-    // Public Identities section
     writeln!(out, "## Public Identities\n").unwrap();
     if report.identities.is_empty() {
         writeln!(
@@ -175,7 +172,6 @@ pub fn export_markdown(report: &Report) -> Result<String, SpoorError> {
         writeln!(out, "\n> [!NOTE]\n> Email addresses listed above were observed in public Git commit headers or public profile attributes. They do not assert private contact status.\n").unwrap();
     }
 
-    // Repositories section
     writeln!(out, "## Repositories\n").unwrap();
     if report.repositories.is_empty() {
         writeln!(out, "*No repositories listed.*\n").unwrap();
@@ -219,7 +215,6 @@ pub fn export_markdown(report: &Report) -> Result<String, SpoorError> {
         }
     }
 
-    // Public Keys section
     writeln!(out, "## Public Keys & Signing Material\n").unwrap();
     if report.keys.is_empty() {
         writeln!(
@@ -254,7 +249,6 @@ pub fn export_markdown(report: &Report) -> Result<String, SpoorError> {
         writeln!(out).unwrap();
     }
 
-    // Activity section
     writeln!(out, "## Public Activity\n").unwrap();
     writeln!(out, "> {}\n", report.activity.window_note).unwrap();
     writeln!(
@@ -279,7 +273,6 @@ pub fn export_markdown(report: &Report) -> Result<String, SpoorError> {
     .unwrap();
     writeln!(out, "- **Fork Events:** {}\n", report.activity.fork_events).unwrap();
 
-    // Inferences section
     writeln!(out, "## Inferences\n").unwrap();
     if report.inferences.is_empty() {
         writeln!(
@@ -298,7 +291,6 @@ pub fn export_markdown(report: &Report) -> Result<String, SpoorError> {
         }
     }
 
-    // Coverage section
     writeln!(out, "## Coverage Accounting\n").unwrap();
     writeln!(out, "| Metric | Value |").unwrap();
     writeln!(out, "| :--- | :--- |").unwrap();
@@ -335,7 +327,6 @@ pub fn export_markdown(report: &Report) -> Result<String, SpoorError> {
     }
     writeln!(out).unwrap();
 
-    // Provider Status section
     writeln!(out, "## Provider Status\n").unwrap();
     writeln!(out, "| Provider | Status | Items | Detail |").unwrap();
     writeln!(out, "| :--- | :--- | :--- | :--- |").unwrap();
@@ -355,14 +346,12 @@ pub fn export_markdown(report: &Report) -> Result<String, SpoorError> {
     }
     writeln!(out).unwrap();
 
-    // Limitations section
     writeln!(out, "## Inherent Limitations\n").unwrap();
     for lim in &report.limitations {
         writeln!(out, "- {}", lim).unwrap();
     }
     writeln!(out).unwrap();
 
-    // Footer
     writeln!(out, "---\n*Spoor by Voldigoade*").unwrap();
 
     Ok(out)

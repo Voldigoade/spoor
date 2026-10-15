@@ -116,7 +116,6 @@ impl HttpClient {
                         return Ok(resp);
                     }
 
-                    // Handle rate limits or temporary service unavailability
                     if (status == StatusCode::TOO_MANY_REQUESTS
                         || status == StatusCode::SERVICE_UNAVAILABLE)
                         && attempts <= max_retries

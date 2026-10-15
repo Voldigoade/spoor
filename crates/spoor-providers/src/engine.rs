@@ -181,7 +181,6 @@ impl AnalysisEngine {
             options.mode,
         );
 
-        // 1. Fetch GitHub Profile
         Self::emit(
             event_tx,
             SpoorEvent::ProviderStarted {
@@ -259,7 +258,6 @@ impl AnalysisEngine {
                 .with_notes("Public GitHub user profile endpoint"),
         );
 
-        // 2. Fetch Repositories
         let max_repos = match options.mode {
             AnalysisMode::Fast => 30,
             AnalysisMode::Deep => 100,
@@ -302,7 +300,6 @@ impl AnalysisEngine {
             },
         );
 
-        // 3. Commit Scanning Budget & Repository Inspection
         let (repo_scan_limit, commit_per_repo_limit) = match options.mode {
             AnalysisMode::Fast => (3, 30),
             AnalysisMode::Deep => (8, 50),
@@ -367,7 +364,6 @@ impl AnalysisEngine {
             scanned_repo_meta.insert(r.full_name.clone(), (langs, hygiene));
         }
 
-        // Convert repositories to RepoReport
         let mut repo_reports = Vec::new();
         let mut total_stars = 0u64;
         let mut total_forks = 0u64;
@@ -416,7 +412,6 @@ impl AnalysisEngine {
             });
         }
 
-        // 4. Public Keys (GPG & SSH)
         Self::emit(
             event_tx,
             SpoorEvent::ProviderStarted {
@@ -497,7 +492,6 @@ impl AnalysisEngine {
             },
         );
 
-        // 5. Public Activity
         let events = self
             .github
             .fetch_user_events(username, 100)
@@ -531,7 +525,6 @@ impl AnalysisEngine {
         }
         activity_report.active_repositories = active_repos_set.into_iter().collect();
 
-        // 6. GitLeak Enrichment (if enrich=true, or cached)
         let mut gitleak_data: Option<GitLeakResponse> = None;
         if options.enrich {
             Self::emit(
@@ -1051,7 +1044,6 @@ impl AnalysisEngine {
             }
         }
 
-        // Sort and deduplicate repositories for all identities
         for id in identities_map.values_mut() {
             id.repositories.sort();
             id.repositories.dedup();
@@ -1179,7 +1171,6 @@ impl AnalysisEngine {
             }
         };
 
-        // Languages
         let languages = self
             .github
             .fetch_repository_languages(owner, repo)
@@ -1213,7 +1204,6 @@ impl AnalysisEngine {
             }
         };
 
-        // Commits
         let commit_budget = match mode {
             AnalysisMode::Fast => 30,
             AnalysisMode::Deep => 100,
@@ -1235,7 +1225,6 @@ impl AnalysisEngine {
             .await
             .unwrap_or_default();
 
-        // Identity deduplication from commits
         let mut identities_map: HashMap<String, IdentityRecord> = HashMap::new();
         let repo_full_name = format!("{owner}/{repo}");
 
@@ -1393,7 +1382,6 @@ impl AnalysisEngine {
             }
         }
 
-        // Sort and deduplicate repositories for all identities
         for id in identities_map.values_mut() {
             id.repositories.sort();
             id.repositories.dedup();

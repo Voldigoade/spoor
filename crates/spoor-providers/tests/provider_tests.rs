@@ -405,7 +405,6 @@ async fn test_engine_user_deep_flow_with_gitleak_and_repo_hygiene() {
         .await
         .unwrap();
 
-    // 1. Verify Repository Hygiene
     assert_eq!(report.repositories.len(), 1);
     let repo = &report.repositories[0];
     let hygiene = repo
@@ -423,14 +422,12 @@ async fn test_engine_user_deep_flow_with_gitleak_and_repo_hygiene() {
         "Should not detect dependabot when absent"
     );
 
-    // 2. Verify Repository Languages
     let langs = repo
         .languages
         .as_ref()
         .expect("Languages must be populated for scanned repo");
     assert_eq!(langs.get("Rust"), Some(&50000));
 
-    // 3. Verify Identities and Deduplication
     // We expect: bob@company.com, noreply@github.com, and contact@anonseclab.org
     assert_eq!(report.identities.len(), 3);
 
@@ -487,7 +484,6 @@ async fn test_engine_user_deep_flow_with_gitleak_and_repo_hygiene() {
         .unwrap();
     assert_eq!(ssh.source, "GitLeak Metadata");
 
-    // 6. Verify Provenance
     let gl_prov = report
         .provenance
         .iter()

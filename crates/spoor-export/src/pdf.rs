@@ -71,8 +71,6 @@ fn escape_pdf_text(s: &str) -> String {
 pub fn export_pdf(report: &Report) -> Result<Vec<u8>, SpoorError> {
     let mut pdf = PdfWriter::new();
 
-    // We will generate a structured multi-page PDF document
-    // Let's divide content into pages if necessary (Page 1: Summary, Profile, Identities; Page 2: Repos, Keys, Coverage, Limitations)
     let page_count = 2;
 
     // 1: Catalog
@@ -85,13 +83,10 @@ pub fn export_pdf(report: &Report) -> Result<Vec<u8>, SpoorError> {
     // 8: Page 2
     // 9: Contents for Page 2
 
-    // Page 1 Content
     let mut p1 = Vec::new();
-    // Top banner
     p1.extend_from_slice(b"0.08 0.1 0.14 rg\n"); // dark header background
     p1.extend_from_slice(b"40 760 515 50 re f\n");
 
-    // Header Title
     p1.extend_from_slice(b"BT /F2 18 Tf 1 1 1 rg 55 780 Td (SPOOR) Tj ET\n");
     p1.extend_from_slice(b"BT /F1 10 Tf 0.6 0.7 0.8 rg 135 780 Td (by Voldigoade) Tj ET\n");
     let mode_str = format!("MODE: {}", report.mode.to_string().to_uppercase());
@@ -103,7 +98,6 @@ pub fn export_pdf(report: &Report) -> Result<Vec<u8>, SpoorError> {
         .as_bytes(),
     );
 
-    // Target Info Box
     p1.extend_from_slice(b"0.96 0.97 0.98 rg 40 685 515 65 re f\n");
     p1.extend_from_slice(b"0.85 0.88 0.92 RG 40 685 515 65 re S\n");
 
@@ -130,7 +124,6 @@ pub fn export_pdf(report: &Report) -> Result<Vec<u8>, SpoorError> {
         .as_bytes(),
     );
 
-    // Section 1: Summary Facts Grid
     p1.extend_from_slice(
         b"BT /F2 12 Tf 0.15 0.2 0.3 rg 40 660 Td (1. SUMMARY OF FINDINGS) Tj ET\n",
     );
@@ -187,7 +180,6 @@ pub fn export_pdf(report: &Report) -> Result<Vec<u8>, SpoorError> {
         y -= 14;
     }
 
-    // Section 2: Observed Public Identities
     y -= 10;
     p1.extend_from_slice(
         format!(
@@ -199,7 +191,6 @@ pub fn export_pdf(report: &Report) -> Result<Vec<u8>, SpoorError> {
     p1.extend_from_slice(format!("0.2 0.4 0.8 RG 40 {y} 515 0.5 re S\n").as_bytes());
     y -= 16;
 
-    // Table header
     p1.extend_from_slice(format!("0.94 0.95 0.96 rg 40 {y} 515 14 re f\n").as_bytes());
     p1.extend_from_slice(
         format!(
@@ -235,16 +226,13 @@ pub fn export_pdf(report: &Report) -> Result<Vec<u8>, SpoorError> {
         }
     }
 
-    // Footnote on page 1
     p1.extend_from_slice(b"BT /F1 8 Tf 0.5 0.5 0.5 rg 40 65 Td (* Sourced strictly from public Git commit headers and GitHub public API endpoints.) Tj ET\n");
     p1.extend_from_slice(b"0.8 0.8 0.8 RG 40 50 515 0.5 re S\n");
     p1.extend_from_slice(b"BT /F1 8 Tf 0.5 0.5 0.5 rg 40 38 Td (Spoor by Voldigoade) Tj ET\n");
     p1.extend_from_slice(b"BT /F1 8 Tf 0.5 0.5 0.5 rg 505 38 Td (Page 1 of 2) Tj ET\n");
 
-    // Page 2 Content
     let mut p2 = Vec::new();
 
-    // Page 2 header band
     p2.extend_from_slice(b"0.08 0.1 0.14 rg 40 780 515 30 re f\n");
     p2.extend_from_slice(b"BT /F2 11 Tf 1 1 1 rg 50 790 Td (SPOOR - REPORT CONTINUATION) Tj ET\n");
     p2.extend_from_slice(
@@ -257,7 +245,6 @@ pub fn export_pdf(report: &Report) -> Result<Vec<u8>, SpoorError> {
 
     let mut y2 = 750;
 
-    // Section 3: Repositories Sample
     p2.extend_from_slice(
         format!(
             "BT /F2 12 Tf 0.15 0.2 0.3 rg 40 {y2} Td (3. PUBLIC REPOSITORIES (SAMPLE)) Tj ET\n"
@@ -301,7 +288,6 @@ pub fn export_pdf(report: &Report) -> Result<Vec<u8>, SpoorError> {
         y2 -= 13;
     }
 
-    // Section 4: Public Keys & Signing
     y2 -= 10;
     p2.extend_from_slice(
         format!(
@@ -337,7 +323,6 @@ pub fn export_pdf(report: &Report) -> Result<Vec<u8>, SpoorError> {
         }
     }
 
-    // Section 5: Coverage, Provider Status & Limitations
     y2 -= 10;
     p2.extend_from_slice(
         format!(
@@ -369,12 +354,10 @@ pub fn export_pdf(report: &Report) -> Result<Vec<u8>, SpoorError> {
         y2 -= 11;
     }
 
-    // Page 2 footer
     p2.extend_from_slice(b"0.8 0.8 0.8 RG 40 50 515 0.5 re S\n");
     p2.extend_from_slice(b"BT /F1 8 Tf 0.5 0.5 0.5 rg 40 38 Td (Spoor by Voldigoade) Tj ET\n");
     p2.extend_from_slice(b"BT /F1 8 Tf 0.5 0.5 0.5 rg 505 38 Td (Page 2 of 2) Tj ET\n");
 
-    // Compress streams with flate2
     fn compress_stream(data: &[u8]) -> Vec<u8> {
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
         let _ = encoder.write_all(data);

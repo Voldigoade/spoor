@@ -16,6 +16,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node scripts/check-prose.mjs
       - run: cargo fmt --check
 
   clippy:
@@ -49,3 +53,10 @@ jobs:
       - uses: rustsec/audit-check@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t spoor:ci .

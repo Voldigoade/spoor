@@ -1,62 +1,23 @@
-# Limitations & Operational Boundaries
+# Limitations
 
-Spoor is built on the philosophy of empirical correctness, explicit provenance, and strict distinction between facts and inferences. To use and interpret Spoor reports accurately, understand the following operational constraints.
+Spoor reads public GitHub metadata and optional public enrichment. It cannot retrieve private repositories or restore history removed by upstream providers.
 
----
+## Scan coverage
 
-## 1. Strictly Public Data Scope
+User FAST scans up to 3 repositories and 30 commits each; DEEP scans up to 8 repositories and 50 commits each. Non-forks are preferred. The report records sampled repositories, commits, provider status and partial coverage. These bounds are not a complete history scan, including in DEEP mode.
 
-* Spoor queries only publicly reachable GitHub API endpoints, Git public metadata, and public enrichment services.
-* It does not access private repositories, private organizations, private gists, or private email configurations unless the account owner has explicitly made those attributes public.
-* Deleted commits, force-pushed history, or purged accounts are generally not recoverable once pruned by GitHub's upstream garbage collection.
+Public activity comes from GitHub's bounded event window. The current REST client fetches one page of at most 100 events. The report describes the upstream window as the previous 30 days and up to 300 events; that description is broader than the current fetch. Availability and upstream policies may further restrict it. Zero returned events does not establish inactivity.
 
----
+## Enrichment and caches
 
-## 2. GitHub API Retention & Windowing
+FAST skips GitLeak unless enrichment is requested. Enriched FAST and DEEP can return cached enrichment or record rate-limit, timeout and availability warnings. Repository targets skip GitLeak. The local budget defaults to 40 uncached requests/hour; upstream limits can be stricter. Budget failure does not invalidate the GitHub portion.
 
-* **Public Events:** GitHub's public event stream (`/users/{username}/events/public`) only retains activity generated within the previous 30 days, capped at a maximum of 300 events across 3 pages. Reports explicitly note this window and never claim to represent complete lifetime activity history.
-* **Commit Budgets:** Full commit history for multi-thousand-commit repositories is neither practical nor polite to scan over public APIs in interactive workflows. Spoor bounds commit inspection by default:
-  * **FAST mode:** inspects up to 3 most recently pushed repositories, sampling up to 30 commits per repository.
-  * **DEEP mode:** inspects up to 8 repositories, sampling up to 50 commits per repository.
-  * Any report where fewer than 100% of repositories or commits were inspected is explicitly flagged with `coverage.is_partial = true`.
+SQLite caches FAST reports for one hour, DEEP reports for six hours and GitLeak responses for 24 hours. Provider status marks reused data as cached. `spoor cache clear` removes the local cache. HTTP lookup retention is separate; see [operations](docs/OPERATIONS.md).
 
----
+## Interpreting evidence
 
-## 3. GitLeak Quota & Upstream Timeouts
+Observed fields come from public sources. Derived values are calculated from those fields. Inferences, such as activity-hour patterns, remain deductions with a stated basis and limitation. Partial means coverage is bounded; unknown means a fact was not established.
 
-* GitLeak operates with a documented rate limit of 50 requests per hour per client.
-* GitLeak enforces an upstream timeout of approximately 8 seconds for prolific accounts.
-* In **FAST mode**, GitLeak is skipped by default to conserve quota for deep inspection.
-* If GitLeak returns `429 Too Many Requests`, `408 Request Timeout`, or `422 Unprocessable Entity`, Spoor records the condition in `provider_status` and continues assembling the remaining report from GitHub REST and GraphQL data. Upstream enrichment failure does not fail the report.
+Commit author and committer fields can contain historical, shared, automated or misleading identities. An observed address is not proof of ownership or a current contact address. GitHub system identities are excluded from the distinct human-address summary, but remain in the canonical evidence. A verified commit signature does not make every field a verified claim.
 
----
-
-## 4. Inferences vs. Observed Facts
-
-Spoor adheres to a strict classification model:
-
-* **OBSERVED:** Returned directly by a primary authoritative source (e.g. GitHub user profile, raw Git commit author header).
-* **DERIVED:** Calculated mathematically from observed data (e.g. language percentage byte sum, repository star totals).
-* **INFERRED:** Algorithmic deductions (e.g. peak activity hour window, commit timestamp cluster).
-* **PARTIAL:** Sourced with known coverage boundaries (e.g. pagination caps or sample limits).
-* **UNKNOWN:** Unestablished facts.
-
-### Timezone & Working Hours Inferences
-
-* When commit timestamps cluster around specific UTC offsets, Spoor may record an inference regarding peak activity windows.
-* **This is an inference, never a fact.** Commit timestamps can reflect automated CI bots, travel, irregular sleeping hours, or misconfigured local system clocks.
-* Spoor never equates timezone inferences with physical location, residency, or nationality.
-
----
-
-## 5. Cache Freshness & Invalidation
-
-* To prevent rate-limit exhaustion, Spoor caches completed reports and raw provider responses in a local SQLite database (`spoor/cache.sqlite`).
-* Default Time-To-Live (TTL):
-  * **FAST reports:** 1 hour
-  * **DEEP reports:** 6 hours
-  * **GitLeak responses:** 24 hours
-* Cached results are marked with `CACHED` in the provider status map. Users can bypass or reset cache state via:
-  ```bash
-  spoor cache clear
-  ```
+Timestamp patterns can reflect bots, travel or clock errors. They do not establish residence, nationality or working hours.

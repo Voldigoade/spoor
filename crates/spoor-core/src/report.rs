@@ -332,7 +332,6 @@ impl Report {
             0.0
         };
 
-        // Primary languages across repositories
         let mut lang_counts: std::collections::BTreeMap<String, u64> =
             std::collections::BTreeMap::new();
         for r in &self.repositories {

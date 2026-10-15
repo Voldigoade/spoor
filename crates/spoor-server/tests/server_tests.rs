@@ -27,7 +27,6 @@ async fn test_server_health_and_lookups() {
 
     let client = Client::new();
 
-    // 1. Check healthz
     let health_resp = client
         .get(format!("http://{addr}/healthz"))
         .send()
@@ -37,7 +36,6 @@ async fn test_server_health_and_lookups() {
     let health_body: serde_json::Value = health_resp.json().await.unwrap();
     assert_eq!(health_body["status"], "ok");
 
-    // 2. Reject SSRF / invalid target
     let bad_req = client
         .post(format!("http://{addr}/v1/lookups"))
         .json(&serde_json::json!({
@@ -48,7 +46,6 @@ async fn test_server_health_and_lookups() {
         .unwrap();
     assert_eq!(bad_req.status(), StatusCode::BAD_REQUEST);
 
-    // 3. Create valid lookup
     let post_resp = client
         .post(format!("http://{addr}/v1/lookups"))
         .json(&serde_json::json!({
@@ -62,7 +59,6 @@ async fn test_server_health_and_lookups() {
     let meta: serde_json::Value = post_resp.json().await.unwrap();
     let lookup_id = meta["id"].as_str().unwrap();
 
-    // 4. Check status
     let get_resp = client
         .get(format!("http://{addr}/v1/lookups/{lookup_id}"))
         .send()
@@ -300,7 +296,6 @@ async fn test_cors_exact_origin_matching() {
         .get("access-control-allow-origin")
         .is_none());
 
-    // Clean up env var
     std::env::remove_var("SPOOR_ALLOWED_ORIGINS");
 }
 

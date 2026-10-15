@@ -13,7 +13,6 @@ where
         let p = raw.as_ref().trim();
         let lower = p.to_ascii_lowercase();
 
-        // 1. README detection
         if lower == "readme"
             || lower.starts_with("readme.")
             || lower.starts_with(".github/readme.")
@@ -22,7 +21,6 @@ where
             hygiene.has_readme = true;
         }
 
-        // 2. LICENSE detection
         if lower == "license"
             || lower.starts_with("license.")
             || lower == "copying"
@@ -34,7 +32,6 @@ where
             hygiene.has_license = true;
         }
 
-        // 3. SECURITY policy detection
         if lower == "security.md"
             || lower == ".github/security.md"
             || lower == "docs/security.md"
@@ -45,7 +42,6 @@ where
             hygiene.has_security_policy = true;
         }
 
-        // 4. CONTRIBUTING guidelines detection
         if lower == "contributing"
             || lower.starts_with("contributing.")
             || lower.starts_with(".github/contributing.")
@@ -54,19 +50,16 @@ where
             hygiene.has_contributing = true;
         }
 
-        // 5. CODEOWNERS detection
         if lower == "codeowners" || lower == ".github/codeowners" || lower == "docs/codeowners" {
             hygiene.has_codeowners = true;
         }
 
-        // 6. GitHub Actions CI detection
         if lower.starts_with(".github/workflows/")
             && (lower.ends_with(".yml") || lower.ends_with(".yaml"))
         {
             hygiene.has_actions_ci = true;
         }
 
-        // 7. Dependabot configuration detection
         if lower == ".github/dependabot.yml" || lower == ".github/dependabot.yaml" {
             hygiene.has_dependabot = true;
         }
