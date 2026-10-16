@@ -45,11 +45,8 @@ fn is_target_noreply(email: &str, username: &str, user_id: Option<u64>) -> bool 
         }
         if let Some((prefix, suffix)) = rest.split_once('+') {
             if suffix == username {
-                return true;
-            }
-            if let Some(uid) = user_id {
-                if prefix == uid.to_string() && suffix == username {
-                    return true;
+                if let Some(uid) = user_id {
+                    return prefix == uid.to_string();
                 }
             }
         }
@@ -58,12 +55,10 @@ fn is_target_noreply(email: &str, username: &str, user_id: Option<u64>) -> bool 
 }
 
 fn is_target_actor(
-    actor_name: Option<&str>,
     actor_email: &str,
-    gh_user_login: Option<&str>,
+    actor_user: Option<&GhSimpleUser>,
     target_username: &str,
     target_user_id: Option<u64>,
-    profile_name: Option<&str>,
     target_anchors: &HashSet<String>,
 ) -> bool {
     let email_norm = actor_email.trim().to_lowercase();
@@ -75,35 +70,20 @@ fn is_target_actor(
         return true;
     }
 
-    if let Some(login) = gh_user_login {
-        if login.eq_ignore_ascii_case(target_username) {
-            return true;
+    if let Some(user) = actor_user {
+        if user.login.eq_ignore_ascii_case(target_username) {
+            if let Some(target_id) = target_user_id {
+                if user.id == target_id {
+                    return true;
+                }
+            } else {
+                return true;
+            }
         }
     }
 
     if is_target_noreply(&email_norm, target_username, target_user_id) {
         return true;
-    }
-
-    let email_local = email_norm.split('@').next().unwrap_or("");
-    let username_lower = target_username.trim().to_lowercase();
-    let local_matches_username = email_local == username_lower
-        || email_local.ends_with(&format!("+{username_lower}"))
-        || email_local.starts_with(&format!("{username_lower}+"));
-
-    if local_matches_username {
-        if let Some(name) = actor_name {
-            let name_lower = name.trim().to_lowercase();
-            if name_lower == username_lower {
-                return true;
-            }
-            if let Some(p_name) = profile_name {
-                let p_name_lower = p_name.trim().to_lowercase();
-                if !p_name_lower.is_empty() && name_lower == p_name_lower {
-                    return true;
-                }
-            }
-        }
     }
 
     false
@@ -1916,9 +1896,11 @@ impl AnalysisEngine {
         for k in &gpg_keys {
             if let Some(emails) = &k.emails {
                 for e in emails {
-                    let email_clean = e.email.trim().to_lowercase();
-                    if !email_clean.is_empty() && !is_github_platform_system(&email_clean) {
-                        target_anchors.insert(email_clean);
+                    if e.verified == Some(true) {
+                        let email_clean = e.email.trim().to_lowercase();
+                        if !email_clean.is_empty() && !is_github_platform_system(&email_clean) {
+                            target_anchors.insert(email_clean);
+                        }
                     }
                 }
             }
@@ -1953,10 +1935,9 @@ impl AnalysisEngine {
                         commit.search_role,
                         Some(CommitMatchRole::Author) | Some(CommitMatchRole::Both)
                     );
-                    let rest_match = commit
-                        .author_user
-                        .as_ref()
-                        .is_some_and(|u| u.login.eq_ignore_ascii_case(username));
+                    let rest_match = commit.author_user.as_ref().is_some_and(|u| {
+                        u.login.eq_ignore_ascii_case(username) && u.id == gh_user.id
+                    });
                     let noreply_match = is_target_noreply(&a_email, username, Some(gh_user.id));
                     if search_match || rest_match || noreply_match {
                         target_anchors.insert(a_email);
@@ -1970,10 +1951,9 @@ impl AnalysisEngine {
                         commit.search_role,
                         Some(CommitMatchRole::Committer) | Some(CommitMatchRole::Both)
                     );
-                    let rest_match = commit
-                        .committer_user
-                        .as_ref()
-                        .is_some_and(|u| u.login.eq_ignore_ascii_case(username));
+                    let rest_match = commit.committer_user.as_ref().is_some_and(|u| {
+                        u.login.eq_ignore_ascii_case(username) && u.id == gh_user.id
+                    });
                     let noreply_match = is_target_noreply(&c_email, username, Some(gh_user.id));
                     if search_match || rest_match || noreply_match {
                         target_anchors.insert(c_email);
@@ -2004,6 +1984,40 @@ impl AnalysisEngine {
                         is_verified_signer: false,
                     },
                 );
+            }
+        }
+
+        for k in &gpg_keys {
+            if let Some(emails) = &k.emails {
+                for e in emails {
+                    if e.verified == Some(true) {
+                        let email_clean = e.email.trim().to_string();
+                        let email_norm = email_clean.to_lowercase();
+                        if !email_norm.is_empty() && !is_github_platform_system(&email_norm) {
+                            let email_type = classify_email(
+                                &email_clean,
+                                profile_report.public_email.as_deref(),
+                            );
+                            let entry = identities_map.entry(email_norm).or_insert_with(|| {
+                                IdentityRecord {
+                                    name: profile_report.name.clone(),
+                                    email: email_clean,
+                                    email_type,
+                                    first_seen: None,
+                                    last_seen: None,
+                                    commits_observed: 0,
+                                    repositories: Vec::new(),
+                                    sources: vec!["GitHub GPG Key".to_string()],
+                                    is_verified_signer: true,
+                                }
+                            });
+                            if !entry.sources.iter().any(|s| s == "GitHub GPG Key") {
+                                entry.sources.push("GitHub GPG Key".to_string());
+                            }
+                            entry.is_verified_signer = true;
+                        }
+                    }
+                }
             }
         }
 
@@ -2157,24 +2171,20 @@ impl AnalysisEngine {
 
             let is_author_target = author_email.is_some_and(|e| {
                 is_target_actor(
-                    author.map(|a| a.name.as_str()),
                     e,
-                    commit.author_user.as_ref().map(|u| u.login.as_str()),
+                    commit.author_user.as_ref(),
                     username,
                     Some(gh_user.id),
-                    profile_report.name.as_deref(),
                     &target_anchors,
                 )
             });
 
             let is_committer_target = committer_email.is_some_and(|e| {
                 is_target_actor(
-                    committer.map(|c| c.name.as_str()),
                     e,
-                    commit.committer_user.as_ref().map(|u| u.login.as_str()),
+                    commit.committer_user.as_ref(),
                     username,
                     Some(gh_user.id),
-                    profile_report.name.as_deref(),
                     &target_anchors,
                 )
             });
@@ -2974,5 +2984,134 @@ impl AnalysisEngine {
         report.recompute_summary();
 
         Ok(report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_target_noreply_rules() {
+        let username = "alice";
+        let user_id = Some(1001);
+
+        // Legacy form
+        assert!(is_target_noreply(
+            "alice@users.noreply.github.com",
+            username,
+            user_id
+        ));
+        assert!(is_target_noreply(
+            "ALICE@users.noreply.github.com",
+            username,
+            user_id
+        ));
+        assert!(is_target_noreply(
+            "alice@users.noreply.github.com",
+            username,
+            None
+        ));
+
+        // Modern form with exact matching ID
+        assert!(is_target_noreply(
+            "1001+alice@users.noreply.github.com",
+            username,
+            user_id
+        ));
+        assert!(is_target_noreply(
+            "1001+ALICE@users.noreply.github.com",
+            username,
+            user_id
+        ));
+
+        // Negative regression: arbitrary prefix with known ID must NOT match
+        assert!(!is_target_noreply(
+            "999999+alice@users.noreply.github.com",
+            username,
+            user_id
+        ));
+        assert!(!is_target_noreply(
+            "random+alice@users.noreply.github.com",
+            username,
+            user_id
+        ));
+
+        // Negative regression: modern form with unknown target ID must NOT match arbitrary prefix
+        assert!(!is_target_noreply(
+            "999999+alice@users.noreply.github.com",
+            username,
+            None
+        ));
+
+        // Negative: mismatched username
+        assert!(!is_target_noreply(
+            "bob@users.noreply.github.com",
+            username,
+            user_id
+        ));
+        assert!(!is_target_noreply(
+            "1001+bob@users.noreply.github.com",
+            username,
+            user_id
+        ));
+    }
+
+    #[test]
+    fn test_is_target_actor_id_verification_and_no_weak_heuristics() {
+        let target_username = "alice";
+        let target_id = Some(1001);
+        let target_anchors = HashSet::new();
+
+        // Exact login and exact matching ID
+        let valid_user = GhSimpleUser {
+            login: "alice".to_string(),
+            id: 1001,
+        };
+        assert!(is_target_actor(
+            "custom@domain.com",
+            Some(&valid_user),
+            target_username,
+            target_id,
+            &target_anchors
+        ));
+
+        // Negative regression: exact login but mismatched ID (e.g. 9999 vs 1001) MUST NOT match
+        let mismatched_user = GhSimpleUser {
+            login: "alice".to_string(),
+            id: 9999,
+        };
+        assert!(!is_target_actor(
+            "custom@domain.com",
+            Some(&mismatched_user),
+            target_username,
+            target_id,
+            &target_anchors
+        ));
+
+        // Negative regression: weak name/local-part heuristic rejected
+        assert!(!is_target_actor(
+            "alice@thirdparty.com",
+            None,
+            target_username,
+            target_id,
+            &target_anchors
+        ));
+        assert!(!is_target_actor(
+            "alice+sub@thirdparty.com",
+            None,
+            target_username,
+            target_id,
+            &target_anchors
+        ));
+
+        // Negative: platform bots rejected
+        assert!(!is_target_actor(
+            "noreply@github.com",
+            Some(&valid_user),
+            target_username,
+            target_id,
+            &target_anchors
+        ));
     }
 }

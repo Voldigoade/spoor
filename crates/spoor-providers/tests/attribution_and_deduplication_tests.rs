@@ -943,3 +943,561 @@ async fn test_scenario_f_coverage_denominator_accounting() {
     // Denominator consistency
     assert!(report.coverage.repositories_scanned <= report.coverage.repositories_total);
 }
+
+#[tokio::test]
+async fn test_regression_modern_noreply_requires_exact_user_id() {
+    let gh_mock = MockServer::start().await;
+
+    let user_json = r#"{
+        "login": "alice",
+        "id": 1001,
+        "avatar_url": "https://avatars.githubusercontent.com/u/1001",
+        "html_url": "https://github.com/alice",
+        "name": "Alice Target",
+        "email": null,
+        "public_repos": 1,
+        "public_gists": 0,
+        "followers": 0,
+        "following": 0,
+        "created_at": "2020-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z"
+    }"#;
+    Mock::given(method("GET"))
+        .and(path("/users/alice"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(user_json))
+        .mount(&gh_mock)
+        .await;
+
+    let repos_json = r#"[{
+        "name": "my-repo",
+        "full_name": "alice/my-repo",
+        "fork": false,
+        "html_url": "https://github.com/alice/my-repo",
+        "size": 100,
+        "stargazers_count": 0,
+        "forks_count": 0,
+        "open_issues_count": 0,
+        "default_branch": "main"
+    }]"#;
+    Mock::given(method("GET"))
+        .and(path("/users/alice/repos"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(repos_json))
+        .mount(&gh_mock)
+        .await;
+
+    let commits_json = r#"[
+        {
+            "sha": "c111",
+            "html_url": "https://github.com/alice/my-repo/commit/c111",
+            "commit": {
+                "author": {
+                    "name": "Mismatched Prefix",
+                    "email": "999999+alice@users.noreply.github.com",
+                    "date": "2024-01-01T12:00:00Z"
+                },
+                "committer": {
+                    "name": "Mismatched Prefix",
+                    "email": "999999+alice@users.noreply.github.com",
+                    "date": "2024-01-01T12:00:00Z"
+                },
+                "message": "Commit with wrong prefix"
+            }
+        },
+        {
+            "sha": "c222",
+            "html_url": "https://github.com/alice/my-repo/commit/c222",
+            "commit": {
+                "author": {
+                    "name": "Alice Legit",
+                    "email": "1001+alice@users.noreply.github.com",
+                    "date": "2024-01-02T12:00:00Z"
+                },
+                "committer": {
+                    "name": "Alice Legit",
+                    "email": "1001+alice@users.noreply.github.com",
+                    "date": "2024-01-02T12:00:00Z"
+                },
+                "message": "Commit with exact ID prefix"
+            }
+        }
+    ]"#;
+    Mock::given(method("GET"))
+        .and(path("/repos/alice/my-repo/commits"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(commits_json))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/repos/alice/my-repo/git/trees/main"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"tree": []}"#))
+        .mount(&gh_mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/alice/my-repo/languages"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"Rust": 100}"#))
+        .mount(&gh_mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/users/alice/events/public"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/users/alice/gpg_keys"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/users/alice/keys"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"data":{"user":{"contributionsCollection":{"contributionYears":[]}}}}"#,
+        ))
+        .mount(&gh_mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/search/commits"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"{"total_count":0,"incomplete_results":false,"items":[]}"#),
+        )
+        .mount(&gh_mock)
+        .await;
+
+    let http = HttpClient::new();
+    let gh_provider = GitHubProvider::new(
+        http.clone(),
+        Some("mock_token".into()),
+        Some(gh_mock.uri()),
+        Some(format!("{}/graphql", gh_mock.uri())),
+    );
+    let gl_client = GitLeakClient::new(http, None);
+    let cache = Arc::new(NoopCacheStore);
+    let engine = AnalysisEngine::new(gh_provider, gl_client, cache);
+
+    let target = Target::parse("alice").unwrap();
+    let report = engine
+        .run_analysis(&target, AnalysisOptions::fast(), None)
+        .await
+        .unwrap();
+
+    // The modern noreply with exact target ID (1001) is verified target identity
+    assert!(
+        report
+            .identities
+            .iter()
+            .any(|i| i.email == "1001+alice@users.noreply.github.com"),
+        "Exact ID prefix must be attributed to Alice"
+    );
+
+    // Negative check: arbitrary prefix 999999+alice must NOT be attributed to Alice
+    assert!(
+        !report
+            .identities
+            .iter()
+            .any(|i| i.email == "999999+alice@users.noreply.github.com"),
+        "Mismatched ID prefix must not be attributed to Alice"
+    );
+
+    // Instead, it must be placed in related_commit_actors
+    assert!(
+        report
+            .related_commit_actors
+            .iter()
+            .any(|a| a.email == "999999+alice@users.noreply.github.com"),
+        "Mismatched ID prefix commit must be captured in related_commit_actors"
+    );
+}
+
+#[tokio::test]
+async fn test_regression_actor_id_mismatch_prevents_target_attribution() {
+    let gh_mock = MockServer::start().await;
+
+    let user_json = r#"{
+        "login": "alice",
+        "id": 1001,
+        "avatar_url": "https://avatars.githubusercontent.com/u/1001",
+        "html_url": "https://github.com/alice",
+        "name": "Alice Target",
+        "email": null,
+        "public_repos": 1,
+        "public_gists": 0,
+        "followers": 0,
+        "following": 0,
+        "created_at": "2020-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z"
+    }"#;
+    Mock::given(method("GET"))
+        .and(path("/users/alice"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(user_json))
+        .mount(&gh_mock)
+        .await;
+
+    let repos_json = r#"[{
+        "name": "my-repo",
+        "full_name": "alice/my-repo",
+        "fork": false,
+        "html_url": "https://github.com/alice/my-repo",
+        "size": 100,
+        "stargazers_count": 0,
+        "forks_count": 0,
+        "open_issues_count": 0,
+        "default_branch": "main"
+    }]"#;
+    Mock::given(method("GET"))
+        .and(path("/users/alice/repos"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(repos_json))
+        .mount(&gh_mock)
+        .await;
+
+    // One commit has author.login == "alice" BUT id == 9999 (impostor/renamed/mismatched user)
+    // Another commit has author.login == "alice" AND id == 1001 (real target)
+    let commits_json = r#"[
+        {
+            "sha": "bad111",
+            "html_url": "https://github.com/alice/my-repo/commit/bad111",
+            "commit": {
+                "author": {
+                    "name": "Alice Impostor",
+                    "email": "impostor@example.com",
+                    "date": "2024-01-01T12:00:00Z"
+                },
+                "committer": {
+                    "name": "Alice Impostor",
+                    "email": "impostor@example.com",
+                    "date": "2024-01-01T12:00:00Z"
+                },
+                "message": "Commit with wrong actor ID"
+            },
+            "author": {
+                "login": "alice",
+                "id": 9999
+            },
+            "committer": {
+                "login": "alice",
+                "id": 9999
+            }
+        },
+        {
+            "sha": "good222",
+            "html_url": "https://github.com/alice/my-repo/commit/good222",
+            "commit": {
+                "author": {
+                    "name": "Alice Real",
+                    "email": "legit@example.com",
+                    "date": "2024-01-02T12:00:00Z"
+                },
+                "committer": {
+                    "name": "Alice Real",
+                    "email": "legit@example.com",
+                    "date": "2024-01-02T12:00:00Z"
+                },
+                "message": "Commit with matching actor ID"
+            },
+            "author": {
+                "login": "alice",
+                "id": 1001
+            },
+            "committer": {
+                "login": "alice",
+                "id": 1001
+            }
+        }
+    ]"#;
+    Mock::given(method("GET"))
+        .and(path("/repos/alice/my-repo/commits"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(commits_json))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/repos/alice/my-repo/git/trees/main"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"tree": []}"#))
+        .mount(&gh_mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/alice/my-repo/languages"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"Rust": 100}"#))
+        .mount(&gh_mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/users/alice/events/public"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/users/alice/gpg_keys"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/users/alice/keys"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"data":{"user":{"contributionsCollection":{"contributionYears":[]}}}}"#,
+        ))
+        .mount(&gh_mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/search/commits"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"{"total_count":0,"incomplete_results":false,"items":[]}"#),
+        )
+        .mount(&gh_mock)
+        .await;
+
+    let http = HttpClient::new();
+    let gh_provider = GitHubProvider::new(
+        http.clone(),
+        Some("mock_token".into()),
+        Some(gh_mock.uri()),
+        Some(format!("{}/graphql", gh_mock.uri())),
+    );
+    let gl_client = GitLeakClient::new(http, None);
+    let cache = Arc::new(NoopCacheStore);
+    let engine = AnalysisEngine::new(gh_provider, gl_client, cache);
+
+    let target = Target::parse("alice").unwrap();
+    let report = engine
+        .run_analysis(&target, AnalysisOptions::fast(), None)
+        .await
+        .unwrap();
+
+    // The commit with exact actor id (1001) is verified as Alice
+    assert!(
+        report
+            .identities
+            .iter()
+            .any(|i| i.email == "legit@example.com"),
+        "Matching actor login + ID must be attributed to target"
+    );
+
+    // Negative check: actor id 9999 must NOT establish target identity
+    assert!(
+        !report
+            .identities
+            .iter()
+            .any(|i| i.email == "impostor@example.com"),
+        "Actor with ID mismatch (9999 vs 1001) must NOT be attributed to target"
+    );
+
+    // It must be placed in related_commit_actors
+    assert!(
+        report
+            .related_commit_actors
+            .iter()
+            .any(|a| a.email == "impostor@example.com"),
+        "Actor with ID mismatch must be captured in related_commit_actors"
+    );
+}
+
+#[tokio::test]
+async fn test_regression_gpg_verified_email_only() {
+    let gh_mock = MockServer::start().await;
+
+    let user_json = r#"{
+        "login": "alice",
+        "id": 1001,
+        "avatar_url": "https://avatars.githubusercontent.com/u/1001",
+        "html_url": "https://github.com/alice",
+        "name": "Alice Target",
+        "email": null,
+        "public_repos": 1,
+        "public_gists": 0,
+        "followers": 0,
+        "following": 0,
+        "created_at": "2020-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z"
+    }"#;
+    Mock::given(method("GET"))
+        .and(path("/users/alice"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(user_json))
+        .mount(&gh_mock)
+        .await;
+
+    let repos_json = r#"[{
+        "name": "my-repo",
+        "full_name": "alice/my-repo",
+        "fork": false,
+        "html_url": "https://github.com/alice/my-repo",
+        "size": 100,
+        "stargazers_count": 0,
+        "forks_count": 0,
+        "open_issues_count": 0,
+        "default_branch": "main"
+    }]"#;
+    Mock::given(method("GET"))
+        .and(path("/users/alice/repos"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(repos_json))
+        .mount(&gh_mock)
+        .await;
+
+    let commits_json = r#"[
+        {
+            "sha": "g111",
+            "html_url": "https://github.com/alice/my-repo/commit/g111",
+            "commit": {
+                "author": {
+                    "name": "Alice Verified GPG",
+                    "email": "verified-gpg@example.com",
+                    "date": "2024-01-01T12:00:00Z"
+                },
+                "committer": {
+                    "name": "Alice Verified GPG",
+                    "email": "verified-gpg@example.com",
+                    "date": "2024-01-01T12:00:00Z"
+                },
+                "message": "Commit with verified GPG email"
+            }
+        },
+        {
+            "sha": "g222",
+            "html_url": "https://github.com/alice/my-repo/commit/g222",
+            "commit": {
+                "author": {
+                    "name": "Alice Unverified GPG",
+                    "email": "unverified-gpg@example.com",
+                    "date": "2024-01-02T12:00:00Z"
+                },
+                "committer": {
+                    "name": "Alice Unverified GPG",
+                    "email": "unverified-gpg@example.com",
+                    "date": "2024-01-02T12:00:00Z"
+                },
+                "message": "Commit with unverified GPG email"
+            }
+        }
+    ]"#;
+    Mock::given(method("GET"))
+        .and(path("/repos/alice/my-repo/commits"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(commits_json))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/repos/alice/my-repo/git/trees/main"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"tree": []}"#))
+        .mount(&gh_mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/alice/my-repo/languages"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"Rust": 100}"#))
+        .mount(&gh_mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/users/alice/events/public"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+
+    // GPG endpoint returns one verified email and one unverified email on the key
+    let gpg_keys_json = r#"[
+        {
+            "id": 555,
+            "key_id": "3AA5C34371567BD2",
+            "emails": [
+                {
+                    "email": "verified-gpg@example.com",
+                    "verified": true
+                },
+                {
+                    "email": "unverified-gpg@example.com",
+                    "verified": false
+                }
+            ],
+            "can_sign": true
+        }
+    ]"#;
+    Mock::given(method("GET"))
+        .and(path("/users/alice/gpg_keys"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(gpg_keys_json))
+        .mount(&gh_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/alice/keys"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gh_mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"data":{"user":{"contributionsCollection":{"contributionYears":[]}}}}"#,
+        ))
+        .mount(&gh_mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/search/commits"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"{"total_count":0,"incomplete_results":false,"items":[]}"#),
+        )
+        .mount(&gh_mock)
+        .await;
+
+    let http = HttpClient::new();
+    let gh_provider = GitHubProvider::new(
+        http.clone(),
+        Some("mock_token".into()),
+        Some(gh_mock.uri()),
+        Some(format!("{}/graphql", gh_mock.uri())),
+    );
+    let gl_client = GitLeakClient::new(http, None);
+    let cache = Arc::new(NoopCacheStore);
+    let engine = AnalysisEngine::new(gh_provider, gl_client, cache);
+
+    let target = Target::parse("alice").unwrap();
+    let report = engine
+        .run_analysis(&target, AnalysisOptions::fast(), None)
+        .await
+        .unwrap();
+
+    // The verified GPG email is added to target identities
+    assert!(
+        report
+            .identities
+            .iter()
+            .any(|i| i.email == "verified-gpg@example.com"),
+        "Verified GPG email must be present in target identities"
+    );
+
+    // Negative check: unverified GPG email must NOT be present in target identities
+    assert!(
+        !report
+            .identities
+            .iter()
+            .any(|i| i.email == "unverified-gpg@example.com"),
+        "Unverified GPG email must NOT be present in target identities"
+    );
+
+    // Unverified address seen in commit is captured in related_commit_actors
+    assert!(
+        report
+            .related_commit_actors
+            .iter()
+            .any(|a| a.email == "unverified-gpg@example.com"),
+        "Commit with unverified GPG email must be captured in related_commit_actors"
+    );
+
+    // Both emails remain visible as key metadata in report.keys
+    let key_record = report
+        .keys
+        .iter()
+        .find(|k| k.key_id.as_deref() == Some("3AA5C34371567BD2"))
+        .unwrap();
+    assert!(key_record
+        .emails
+        .contains(&"verified-gpg@example.com".to_string()));
+    assert!(key_record
+        .emails
+        .contains(&"unverified-gpg@example.com".to_string()));
+}

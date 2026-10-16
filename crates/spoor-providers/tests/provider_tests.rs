@@ -159,6 +159,14 @@ async fn test_engine_user_fast_flow() {
                     "verified": true,
                     "reason": "valid"
                 }
+            },
+            "author": {
+                "login": "alice",
+                "id": 1234
+            },
+            "committer": {
+                "login": "alice",
+                "id": 1234
             }
         }
     ]"#;
@@ -285,6 +293,14 @@ async fn test_engine_user_deep_flow_with_gitleak_and_repo_hygiene() {
                     "verified": true,
                     "reason": "valid"
                 }
+            },
+            "author": {
+                "login": "bob",
+                "id": 5678
+            },
+            "committer": {
+                "login": "bob",
+                "id": 5678
             }
         },
         {
