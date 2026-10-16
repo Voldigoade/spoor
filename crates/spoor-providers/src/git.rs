@@ -23,12 +23,68 @@ pub struct GitCommitRecord {
     pub repository: String,
 }
 
-struct TempDirGuard {
+#[allow(clippy::permissions_set_readonly_false)]
+fn make_dir_writable_recursive(path: &Path) {
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if let Ok(meta) = entry.metadata() {
+                if meta.permissions().readonly() {
+                    let mut perms = meta.permissions();
+                    perms.set_readonly(false);
+                    let _ = std::fs::set_permissions(&p, perms);
+                }
+                if meta.is_dir() {
+                    make_dir_writable_recursive(&p);
+                }
+            }
+        }
+    }
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.permissions().readonly() {
+            let mut perms = meta.permissions();
+            perms.set_readonly(false);
+            let _ = std::fs::set_permissions(path, perms);
+        }
+    }
+}
+
+pub fn remove_dir_all_robust(path: &Path) -> Result<(), std::io::Error> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    make_dir_writable_recursive(path);
+
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(_) if !path.exists() => Ok(()),
+        Err(e) => {
+            let mut last_err = e;
+            for delay_ms in [20, 50, 100, 200, 300, 500] {
+                std::thread::sleep(Duration::from_millis(delay_ms));
+                make_dir_writable_recursive(path);
+                match std::fs::remove_dir_all(path) {
+                    Ok(()) => return Ok(()),
+                    Err(_) if !path.exists() => return Ok(()),
+                    Err(err) => last_err = err,
+                }
+            }
+            if !path.exists() {
+                Ok(())
+            } else {
+                Err(last_err)
+            }
+        }
+    }
+}
+
+pub struct TempDirGuard {
     path: PathBuf,
 }
 
 impl TempDirGuard {
-    fn new(prefix: &str) -> Result<Self, SpoorError> {
+    pub fn new(prefix: &str) -> Result<Self, SpoorError> {
         let temp_dir = std::env::temp_dir().join(format!("{prefix}-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).map_err(|e| {
             SpoorError::Internal(format!(
@@ -38,15 +94,22 @@ impl TempDirGuard {
         Ok(Self { path: temp_dir })
     }
 
-    fn path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn cleanup(&mut self) -> Result<(), std::io::Error> {
+        if self.path.exists() {
+            remove_dir_all_robust(&self.path)?;
+        }
+        Ok(())
     }
 }
 
 impl Drop for TempDirGuard {
     fn drop(&mut self) {
-        if self.path.exists() {
-            let _ = std::fs::remove_dir_all(&self.path);
+        if let Err(e) = self.cleanup() {
+            warn!(path = %self.path.display(), error = %e, "Failed to remove temporary directory guard");
         }
     }
 }
@@ -149,13 +212,20 @@ impl GitInspector {
             });
         }
 
-        let temp_guard = TempDirGuard::new("spoor-git-repo")?;
-        let repo_dir = temp_guard.path();
+        let mut temp_guard = TempDirGuard::new("spoor-git-repo")?;
+        let repo_dir = temp_guard.path().to_path_buf();
 
         debug!(owner = %owner, repo = %repo, "Initiating safe bare clone for history inspection");
 
-        let mut child = tokio::process::Command::new("git")
-            .arg("-c")
+        let mut clone_session = crate::process_tree::ProcessTreeSession::new().map_err(|e| {
+            SpoorError::ProviderError {
+                provider: "git".to_string(),
+                message: format!("Failed to create process tree session: {e}"),
+            }
+        })?;
+
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.arg("-c")
             .arg("core.hooksPath=/dev/null")
             .arg("-c")
             .arg("credential.helper=")
@@ -163,13 +233,22 @@ impl GitInspector {
             .arg("--bare")
             .arg("--filter=blob:none")
             .arg(&clone_url)
-            .arg(repo_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
+            .arg(&repo_dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+
+        clone_session.prepare_command(&mut cmd);
+
+        let mut child = cmd.spawn().map_err(|e| SpoorError::ProviderError {
+            provider: "git".to_string(),
+            message: format!("Failed to spawn git clone: {e}"),
+        })?;
+
+        clone_session
+            .attach_child(&child)
             .map_err(|e| SpoorError::ProviderError {
                 provider: "git".to_string(),
-                message: format!("Failed to spawn git clone: {e}"),
+                message: format!("Failed to attach git clone to process tree session: {e}"),
             })?;
 
         let stderr = child.stderr.take();
@@ -183,14 +262,14 @@ impl GitInspector {
         });
 
         let max_budget = self.max_bytes_budget;
+        let repo_dir_clone = repo_dir.clone();
         let monitor_future = async {
             let mut interval = tokio::time::interval(Duration::from_millis(100));
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        let size = Self::calculate_dir_size(repo_dir);
+                        let size = Self::calculate_dir_size(&repo_dir_clone);
                         if size > max_budget {
-                            let _ = child.kill().await;
                             return Err(SpoorError::ProviderError {
                                 provider: "git".to_string(),
                                 message: format!(
@@ -206,7 +285,10 @@ impl GitInspector {
                             provider: "git".to_string(),
                             message: format!("Failed to wait for git clone: {e}"),
                         })?;
-                        let stderr_bytes = stderr_handle.await.unwrap_or_default();
+                        let stderr_bytes = match tokio::time::timeout(Duration::from_millis(500), stderr_handle).await {
+                            Ok(Ok(bytes)) => bytes,
+                            _ => Vec::new(),
+                        };
                         if !exit_status.success() {
                             let stderr_str = String::from_utf8_lossy(&stderr_bytes);
                             warn!(owner = %owner, repo = %repo, stderr = %stderr_str, "Git clone exited with error");
@@ -221,10 +303,24 @@ impl GitInspector {
             }
         };
 
-        match tokio::time::timeout(self.timeout_duration, monitor_future).await {
-            Ok(res) => res?,
-            Err(_) => {
+        let clone_result = tokio::time::timeout(self.timeout_duration, monitor_future).await;
+
+        match clone_result {
+            Ok(Ok(())) => {
+                clone_session.terminate();
+            }
+            Ok(Err(e)) => {
+                clone_session.terminate();
                 let _ = child.kill().await;
+                let _ = child.wait().await;
+                let _ = temp_guard.cleanup();
+                return Err(e);
+            }
+            Err(_) => {
+                clone_session.terminate();
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                let _ = temp_guard.cleanup();
                 return Err(SpoorError::Timeout {
                     provider: "git".to_string(),
                     timeout_secs: self.timeout_duration.as_secs(),
@@ -236,40 +332,108 @@ impl GitInspector {
         let format_arg =
             "--format=format:%H%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%G?%x00%s";
 
-        let log_cmd = tokio::process::Command::new("git")
+        let mut log_session = crate::process_tree::ProcessTreeSession::new().map_err(|e| {
+            SpoorError::ProviderError {
+                provider: "git".to_string(),
+                message: format!("Failed to create process tree session for git log: {e}"),
+            }
+        })?;
+
+        let mut log_cmd = tokio::process::Command::new("git");
+        log_cmd
             .arg("-C")
-            .arg(repo_dir)
+            .arg(&repo_dir)
+            .arg("--no-pager")
             .arg("log")
             .arg("--all")
             .arg(&max_arg)
             .arg(format_arg)
-            .output();
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
 
-        let log_output = match tokio::time::timeout(self.timeout_duration, log_cmd).await {
-            Ok(Ok(output)) => output,
-            Ok(Err(e)) => {
-                return Err(SpoorError::ProviderError {
-                    provider: "git".to_string(),
-                    message: format!("Failed to execute git log: {e}"),
-                });
+        log_session.prepare_command(&mut log_cmd);
+
+        let mut log_child = log_cmd.spawn().map_err(|e| SpoorError::ProviderError {
+            provider: "git".to_string(),
+            message: format!("Failed to spawn git log: {e}"),
+        })?;
+
+        log_session
+            .attach_child(&log_child)
+            .map_err(|e| SpoorError::ProviderError {
+                provider: "git".to_string(),
+                message: format!("Failed to attach git log to process tree session: {e}"),
+            })?;
+
+        let stdout = log_child.stdout.take();
+        let stderr = log_child.stderr.take();
+
+        let stdout_handle = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut r) = stdout {
+                use tokio::io::AsyncReadExt;
+                let _ = r.read_to_end(&mut buf).await;
             }
-            Err(_) => {
-                return Err(SpoorError::Timeout {
-                    provider: "git".to_string(),
-                    timeout_secs: self.timeout_duration.as_secs(),
-                });
+            buf
+        });
+
+        let stderr_handle = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut r) = stderr {
+                use tokio::io::AsyncReadExt;
+                let _ = r.read_to_end(&mut buf).await;
             }
+            buf
+        });
+
+        let log_wait_future = async {
+            let status = log_child
+                .wait()
+                .await
+                .map_err(|e| SpoorError::ProviderError {
+                    provider: "git".to_string(),
+                    message: format!("Failed to wait for git log: {e}"),
+                })?;
+            let stdout_bytes =
+                match tokio::time::timeout(Duration::from_millis(500), stdout_handle).await {
+                    Ok(Ok(bytes)) => bytes,
+                    _ => Vec::new(),
+                };
+            let stderr_bytes =
+                match tokio::time::timeout(Duration::from_millis(500), stderr_handle).await {
+                    Ok(Ok(bytes)) => bytes,
+                    _ => Vec::new(),
+                };
+            Ok((status, stdout_bytes, stderr_bytes))
         };
 
-        if !log_output.status.success() {
-            let stderr = String::from_utf8_lossy(&log_output.stderr);
+        let (log_status, stdout_bytes, stderr_bytes) =
+            match tokio::time::timeout(self.timeout_duration, log_wait_future).await {
+                Ok(res) => res?,
+                Err(_) => {
+                    log_session.terminate();
+                    let _ = log_child.kill().await;
+                    let _ = log_child.wait().await;
+                    let _ = temp_guard.cleanup();
+                    return Err(SpoorError::Timeout {
+                        provider: "git".to_string(),
+                        timeout_secs: self.timeout_duration.as_secs(),
+                    });
+                }
+            };
+
+        log_session.terminate();
+
+        if !log_status.success() {
+            let stderr_str = String::from_utf8_lossy(&stderr_bytes);
+            let _ = temp_guard.cleanup();
             return Err(SpoorError::ProviderError {
                 provider: "git".to_string(),
-                message: format!("git log failed: {}", stderr.trim()),
+                message: format!("git log failed: {}", stderr_str.trim()),
             });
         }
 
-        let stdout = String::from_utf8_lossy(&log_output.stdout);
+        let stdout = String::from_utf8_lossy(&stdout_bytes);
         let mut records = Vec::new();
         let repo_identifier = format!("{owner}/{repo}");
 
