@@ -691,7 +691,6 @@ impl ProcessTreeSession {
         }
         #[cfg(unix)]
         {
-            use std::os::unix::process::CommandExt;
             let mut tokio_cmd = tokio::process::Command::new(&cmd.program);
             tokio_cmd.args(&cmd.args);
             if let Some(dir) = &cmd.current_dir {
