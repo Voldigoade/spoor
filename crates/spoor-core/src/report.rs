@@ -8,7 +8,7 @@ use crate::email::EmailType;
 use crate::provenance::Provenance;
 use crate::target::{AnalysisMode, Target};
 
-pub const SCHEMA_VERSION: &str = "1.1";
+pub const SCHEMA_VERSION: &str = "1.2";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeneratorInfo {
@@ -77,6 +77,22 @@ pub struct IdentityRecord {
     pub repositories: Vec<String>,
     pub sources: Vec<String>,
     pub is_verified_signer: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelatedActorRecord {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub email: String,
+    pub email_type: EmailType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_seen: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<DateTime<Utc>>,
+    pub commits_observed: usize,
+    pub repositories: Vec<String>,
+    pub sources: Vec<String>,
+    pub relationship: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,14 +242,75 @@ pub struct ProviderStatus {
     pub message: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommitMatchRole {
+    Author,
+    Committer,
+    Both,
+}
+
+impl std::fmt::Display for CommitMatchRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CommitMatchRole::Author => write!(f, "Author"),
+            CommitMatchRole::Committer => write!(f, "Committer"),
+            CommitMatchRole::Both => write!(f, "Author & Committer"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DiscoveryCoverage {
+    pub owned_repositories_discovered: usize,
+    pub external_repositories_discovered: usize,
+    pub candidates_selected: usize,
+    pub owned_selected: usize,
+    pub external_selected: usize,
+    pub candidates_skipped: usize,
+    pub repository_scans_attempted: usize,
+    pub repository_scans_succeeded: usize,
+    pub repository_scans_failed: usize,
+    pub global_author_commits_found: usize,
+    pub global_committer_commits_found: usize,
+    pub commit_search_windows_complete: usize,
+    pub commit_search_windows_partial: usize,
+    pub git_history_attempted: usize,
+    pub git_history_succeeded: usize,
+    pub git_history_failed: usize,
+    pub git_history_timed_out: usize,
+    pub graphql_years_fully_traversed: bool,
+    pub stopped_due_to_budget: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CoverageRecord {
     pub commits_scanned: usize,
     pub repositories_scanned: usize,
     pub repositories_total: usize,
+    #[serde(default)]
+    pub owned_repositories_total: usize,
+    #[serde(default)]
+    pub owned_repositories_scanned: usize,
+    #[serde(default)]
+    pub external_repositories_discovered: usize,
+    #[serde(default)]
+    pub external_repositories_scanned: usize,
+    #[serde(default)]
+    pub candidate_repositories_total: usize,
+    #[serde(default)]
+    pub candidate_repositories_scanned: usize,
+    #[serde(default)]
+    pub candidate_repositories_found: usize,
+    #[serde(default)]
+    pub global_commits_found: usize,
+    #[serde(default)]
+    pub git_history_inspected: bool,
     pub is_partial: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<DiscoveryCoverage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -264,6 +341,8 @@ pub struct Report {
     pub repositories: Vec<RepoReport>,
     pub activity: ActivityReport,
     pub identities: Vec<IdentityRecord>,
+    #[serde(default)]
+    pub related_commit_actors: Vec<RelatedActorRecord>,
     pub keys: Vec<KeyRecord>,
     pub inferences: Vec<InferenceRecord>,
     pub provider_status: HashMap<String, ProviderStatus>,
@@ -290,6 +369,7 @@ impl Report {
                 ..Default::default()
             },
             identities: Vec::new(),
+            related_commit_actors: Vec::new(),
             keys: Vec::new(),
             inferences: Vec::new(),
             provider_status: HashMap::new(),

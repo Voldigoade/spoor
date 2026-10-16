@@ -37,6 +37,8 @@ pub trait CacheStore: Send + Sync {
 
     async fn stats(&self) -> Result<CacheStats, SpoorError>;
 
+    async fn prune_expired(&self) -> Result<usize, SpoorError>;
+
     async fn clear(&self) -> Result<usize, SpoorError>;
 }
 
@@ -195,6 +197,12 @@ impl CacheStore for SqliteCacheStore {
         )
         .map_err(|e| SpoorError::Cache(e.to_string()))?;
 
+        // Bounded opportunistic cleanup of expired records on write
+        let _ = conn.execute(
+            "DELETE FROM spoor_cache WHERE expires_at <= ?1",
+            params![now],
+        );
+
         Ok(())
     }
 
@@ -234,6 +242,23 @@ impl CacheStore for SqliteCacheStore {
         })
     }
 
+    async fn prune_expired(&self) -> Result<usize, SpoorError> {
+        let now = Self::now_secs();
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| SpoorError::Cache("Failed to lock cache connection".into()))?;
+
+        let deleted = conn
+            .execute(
+                "DELETE FROM spoor_cache WHERE expires_at <= ?1",
+                params![now],
+            )
+            .map_err(|e| SpoorError::Cache(e.to_string()))?;
+
+        Ok(deleted)
+    }
+
     async fn clear(&self) -> Result<usize, SpoorError> {
         let conn = self
             .conn
@@ -271,6 +296,9 @@ impl CacheStore for NoopCacheStore {
     async fn stats(&self) -> Result<CacheStats, SpoorError> {
         Ok(CacheStats::default())
     }
+    async fn prune_expired(&self) -> Result<usize, SpoorError> {
+        Ok(0)
+    }
     async fn clear(&self) -> Result<usize, SpoorError> {
         Ok(0)
     }
@@ -300,5 +328,40 @@ mod tests {
         let cleared = cache.clear().await.unwrap();
         assert_eq!(cleared, 1);
         assert_eq!(cache.get("github", "torvalds", "fast").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn prune_expired_removes_stale_records() {
+        let cache = SqliteCacheStore::in_memory().unwrap();
+
+        // Insert an active record and an expired record
+        cache
+            .set("github", "user1", "fast", "active_data", 3600)
+            .await
+            .unwrap();
+
+        // Insert directly with past timestamp to simulate stale record without waiting
+        {
+            let conn = cache.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO spoor_cache (cache_key, provider, target, options_hash, data, created_at, expires_at)
+                 VALUES ('github:user2:fast', 'github', 'user2', 'fast', 'expired_data', 1000, 1001)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let stats = cache.stats().await.unwrap();
+        assert_eq!(stats.total_entries, 2);
+        assert_eq!(stats.active_entries, 1);
+        assert_eq!(stats.expired_entries, 1);
+
+        let pruned = cache.prune_expired().await.unwrap();
+        assert_eq!(pruned, 1);
+
+        let stats_after = cache.stats().await.unwrap();
+        assert_eq!(stats_after.total_entries, 1);
+        assert_eq!(stats_after.active_entries, 1);
+        assert_eq!(stats_after.expired_entries, 0);
     }
 }

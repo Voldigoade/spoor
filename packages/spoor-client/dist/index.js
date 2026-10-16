@@ -1,9 +1,4 @@
 "use strict";
-/**
- * Spoor TypeScript Integration Client
- * Author: Voldigoade
- * Repository: https://github.com/Voldigoade/spoor
- */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SpoorClient = void 0;
 class SpoorClient {
@@ -19,7 +14,10 @@ class SpoorClient {
         return res.json();
     }
     async startLookup(target, mode = 'fast', enrich) {
-        const payload = { target, mode };
+        const payload = {
+            target,
+            mode,
+        };
         if (enrich !== undefined) {
             payload.enrich = enrich;
         }

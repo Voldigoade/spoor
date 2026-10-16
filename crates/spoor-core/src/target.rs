@@ -61,20 +61,29 @@ impl AnalysisOptions {
     pub fn deep() -> Self {
         Self {
             mode: AnalysisMode::Deep,
+            enrich: false,
+        }
+    }
+
+    pub fn deep_enriched() -> Self {
+        Self {
+            mode: AnalysisMode::Deep,
             enrich: true,
         }
     }
 
     pub fn new(mode: AnalysisMode, enrich: Option<bool>) -> Self {
-        let enrich = enrich.unwrap_or(mode == AnalysisMode::Deep);
+        let enrich = enrich.unwrap_or(false);
         Self { mode, enrich }
     }
 }
 
 impl From<AnalysisMode> for AnalysisOptions {
     fn from(mode: AnalysisMode) -> Self {
-        let enrich = mode == AnalysisMode::Deep;
-        Self { mode, enrich }
+        Self {
+            mode,
+            enrich: false,
+        }
     }
 }
 
@@ -119,7 +128,6 @@ impl Target {
             });
         }
 
-        // Reject control characters or null bytes
         if trimmed.chars().any(|c| c.is_control() || c == '\0') {
             return Err(SpoorError::InvalidTarget {
                 input: raw.to_string(),
@@ -127,7 +135,6 @@ impl Target {
             });
         }
 
-        // Check if input looks like a URL or domain
         if trimmed.starts_with("http://")
             || trimmed.starts_with("https://")
             || trimmed.starts_with("github.com/")
@@ -136,14 +143,12 @@ impl Target {
             return Self::parse_url(trimmed);
         }
 
-        // Check if someone passed another domain or scheme
         if trimmed.contains("://") || trimmed.contains(".com/") || trimmed.contains(".org/") {
             return Err(SpoorError::SsrfProtection(format!(
                 "Non-GitHub URL rejected: '{raw}'"
             )));
         }
 
-        // Shorthand format: either "owner/repo" or "username"
         if let Some((owner, repo_part)) = trimmed.split_once('/') {
             if repo_part.contains('/') {
                 return Err(SpoorError::InvalidTarget {

@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use clap::Parser;
 use spoor_core::{
-    AnalysisMode, CacheStore, Report, SpoorError, SpoorEvent, SqliteCacheStore, Target,
+    AnalysisMode, AnalysisOptions, CacheStore, Report, SpoorError, SpoorEvent, SqliteCacheStore,
+    Target,
 };
 use spoor_export::{export_bytes, ExportFormat};
 use spoor_providers::{AnalysisEngine, GitHubProvider, GitLeakClient, HttpClient};
@@ -14,7 +15,7 @@ mod format;
 mod render;
 mod repl;
 
-use args::{CacheAction, Cli, Commands};
+use args::{CacheAction, Cli, CliExportFormat, CliMode, Commands};
 use format::{bold, green, init_color, red, yellow};
 use render::{render_event, render_terminal_report};
 use repl::run_repl;
@@ -52,38 +53,43 @@ async fn main() {
         cache.clone(),
     ));
 
+    if let Some(target) = cli.target {
+        let options = resolve_options(cli.mode, cli.deep, cli.enrich);
+        if let Err(e) = run_inspect(engine, &target, options, cli.format, cli.output).await {
+            eprintln!("{}: {}", red("[error]"), e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
     match cli.command {
         None => {
             run_repl(engine, cache).await;
         }
         Some(Commands::Inspect {
             target,
+            mode,
             deep,
+            enrich,
             format,
             output,
         }) => {
-            let mode = if deep {
-                AnalysisMode::Deep
-            } else {
-                AnalysisMode::Fast
-            };
-            if let Err(e) = run_inspect(engine, &target, mode, format, output).await {
+            let options = resolve_options(mode, deep, enrich);
+            if let Err(e) = run_inspect(engine, &target, options, format, output).await {
                 eprintln!("{}: {}", red("[error]"), e);
                 std::process::exit(1);
             }
         }
         Some(Commands::User {
             username,
+            mode,
             deep,
+            enrich,
             format,
             output,
         }) => {
-            let mode = if deep {
-                AnalysisMode::Deep
-            } else {
-                AnalysisMode::Fast
-            };
-            if let Err(e) = run_inspect(engine, &username, mode, format, output).await {
+            let options = resolve_options(mode, deep, enrich);
+            if let Err(e) = run_inspect(engine, &username, options, format, output).await {
                 eprintln!("{}: {}", red("[error]"), e);
                 std::process::exit(1);
             }
@@ -93,7 +99,8 @@ async fn main() {
             format,
             output,
         }) => {
-            if let Err(e) = run_inspect(engine, &repo, AnalysisMode::Fast, format, output).await {
+            let options = AnalysisOptions::fast();
+            if let Err(e) = run_inspect(engine, &repo, options, format, output).await {
                 eprintln!("{}: {}", red("[error]"), e);
                 std::process::exit(1);
             }
@@ -103,7 +110,7 @@ async fn main() {
             format,
             output,
         }) => {
-            if let Err(e) = run_export_file(&file, &format, output) {
+            if let Err(e) = run_export_file(&file, format, output) {
                 eprintln!("{}: {}", red("[error]"), e);
                 std::process::exit(1);
             }
@@ -191,11 +198,30 @@ async fn main() {
     }
 }
 
+fn resolve_options(
+    mode_arg: Option<CliMode>,
+    deep_flag: bool,
+    enrich_flag: bool,
+) -> AnalysisOptions {
+    let mode = if deep_flag {
+        AnalysisMode::Deep
+    } else if let Some(m) = mode_arg {
+        m.into()
+    } else {
+        AnalysisMode::Fast
+    };
+
+    AnalysisOptions {
+        mode,
+        enrich: enrich_flag,
+    }
+}
+
 async fn run_inspect(
     engine: Arc<AnalysisEngine>,
     raw_target: &str,
-    mode: AnalysisMode,
-    format_arg: Option<String>,
+    options: AnalysisOptions,
+    format_arg: Option<CliExportFormat>,
     output_arg: Option<String>,
 ) -> Result<(), SpoorError> {
     let target = Target::parse(raw_target)?;
@@ -211,11 +237,11 @@ async fn run_inspect(
         }
     });
 
-    let report = engine.run_analysis(&target, mode, Some(tx)).await?;
+    let report = engine.run_analysis(&target, options, Some(tx)).await?;
     let _ = event_printer.await;
 
-    if let Some(fmt_str) = format_arg {
-        let fmt = ExportFormat::from_str_loose(&fmt_str)?;
+    if let Some(cli_fmt) = format_arg {
+        let fmt: ExportFormat = cli_fmt.into();
         let bytes = export_bytes(&report, fmt)?;
 
         if let Some(dest_path) = output_arg {
@@ -242,7 +268,7 @@ async fn run_inspect(
 
 fn run_export_file(
     file_path: &str,
-    format_str: &str,
+    format_arg: CliExportFormat,
     output_path: Option<String>,
 ) -> Result<(), SpoorError> {
     let content = std::fs::read_to_string(file_path).map_err(|e| {
@@ -252,7 +278,7 @@ fn run_export_file(
     let report: Report = serde_json::from_str(&content)
         .map_err(|e| SpoorError::Export(format!("Invalid report JSON in '{file_path}': {e}")))?;
 
-    let fmt = ExportFormat::from_str_loose(format_str)?;
+    let fmt: ExportFormat = format_arg.into();
     let bytes = export_bytes(&report, fmt)?;
 
     let dest = output_path.unwrap_or_else(|| {
@@ -279,10 +305,22 @@ fn run_providers_status() {
         yellow("Not configured (Anonymous REST degradation: 60 req/hr)")
     };
 
+    let git_status = if std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        green("Available (local repository history inspection)")
+    } else {
+        yellow("Not found in PATH (history inspection disabled)")
+    };
+
     println!("{}", bold("Spoor Configured Providers:"));
     println!("  * GitHub REST API:    Active");
     println!("  * GitHub GraphQL:     Active");
     println!("  * GitHub Auth Token:  {token_status}");
-    println!("  * GitLeak API:        Active (50 req/hr quota, DEEP mode only)");
+    println!("  * Local Git CLI:      {git_status}");
+    println!("  * GitLeak API:        Active (50 req/hr quota, optional enrichment via --enrich / enrich: true)");
     println!("  * Public Keys:        Active (GPG & SSH)\n");
 }

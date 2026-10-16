@@ -1,4 +1,4 @@
-use spoor_core::{Report, SpoorError};
+use spoor_core::{ProviderHealth, Report, SpoorError};
 
 pub fn escape_xml(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -15,8 +15,38 @@ pub fn escape_xml(s: &str) -> String {
     out
 }
 
+pub fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.chars().count() <= max_len {
+        s.to_string()
+    } else {
+        let mut res: String = s.chars().take(max_len.saturating_sub(1)).collect();
+        res.push('\u{2026}');
+        res
+    }
+}
+
+fn short_provider_name(name: &str) -> &str {
+    if name.contains("REST") || name.contains("Repositories") {
+        "REST"
+    } else if name.contains("GraphQL") || name.contains("Contributions") {
+        "GRAPHQL"
+    } else if name.contains("Events") {
+        "EVENTS"
+    } else if name.contains("Search") {
+        "SEARCH"
+    } else if name.contains("Git History") || name.contains("Git") {
+        "GIT"
+    } else if name.contains("GitLeak") {
+        "GITLEAK"
+    } else if name.contains("Keys") {
+        "KEYS"
+    } else {
+        name
+    }
+}
+
 pub fn export_svg(report: &Report) -> Result<String, SpoorError> {
-    let target_display = escape_xml(&report.target.display_name());
+    let target_display = escape_xml(&truncate_str(&report.target.display_name(), 38));
     let target_type = escape_xml(&report.summary.target_type);
     let mode = escape_xml(&report.mode.to_string().to_uppercase());
     let generated = escape_xml(
@@ -25,7 +55,8 @@ pub fn export_svg(report: &Report) -> Result<String, SpoorError> {
             .format("%Y-%m-%d %H:%M:%S UTC")
             .to_string(),
     );
-    let display_name = escape_xml(&report.summary.display_name);
+    let canonical_url = escape_xml(&truncate_str(&report.target.canonical_url(), 60));
+    let display_name = escape_xml(&truncate_str(&report.summary.display_name, 35));
 
     let total_stars = report.summary.total_stars_accumulated;
     let total_forks = report.summary.total_forks_accumulated;
@@ -33,126 +64,169 @@ pub fn export_svg(report: &Report) -> Result<String, SpoorError> {
     let distinct_emails = report.summary.distinct_emails_observed;
     let keys_count = report.summary.public_keys_found;
 
-    // Identities preview (up to 3)
     let mut id_rows = String::new();
-    let mut y = 295;
+    let mut y = 285;
     for id in report.identities.iter().take(3) {
-        let name = escape_xml(id.name.as_deref().unwrap_or("—"));
-        let email = escape_xml(&id.email);
+        let name = escape_xml(&truncate_str(id.name.as_deref().unwrap_or("-"), 20));
+        let email = escape_xml(&truncate_str(&id.email, 32));
         let email_type = escape_xml(id.email_type.as_str());
+        let verified = if id.is_verified_signer { "YES" } else { "NO" };
         id_rows.push_str(&format!(
             r##"<g transform="translate(40, {y})">
-                <rect width="420" height="48" rx="6" fill="#161b22" stroke="#30363d" />
-                <text x="16" y="20" fill="#f0f6fc" font-size="13" font-weight="600">{email}</text>
-                <text x="16" y="37" fill="#8b949e" font-size="11">{name} · {email_type}</text>
-                <text x="404" y="28" fill="#58a6ff" font-size="12" font-weight="600" text-anchor="end">{commits} cmt</text>
+                <rect width="425" height="46" fill="#ffffff" stroke="#e2e8f0" stroke-width="1" />
+                <text class="mono" x="12" y="18" fill="#0f172a" font-size="11" font-weight="600">{email}</text>
+                <text class="mono" x="12" y="34" fill="#64748b" font-size="10">{name} | {email_type} | VERIFIED: {verified}</text>
+                <text class="mono" x="413" y="26" fill="#0284c7" font-size="11" font-weight="600" text-anchor="end">{commits} cmt</text>
             </g>"##,
             commits = id.commits_observed
         ));
-        y += 58;
+        y += 52;
     }
     if report.identities.is_empty() {
-        id_rows.push_str(r##"<text x="40" y="310" fill="#8b949e" font-size="13">No public commit or profile emails observed</text>"##);
+        id_rows.push_str(
+            r##"<g transform="translate(40, 285)">
+                <rect width="425" height="46" fill="#ffffff" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="4" />
+                <text class="mono" x="16" y="28" fill="#94a3b8" font-size="11">NO PUBLIC COMMITS OR PROFILES RECORDED</text>
+            </g>"##
+        );
     }
 
-    // Top repos preview (up to 3)
     let mut repo_rows = String::new();
-    let mut ry = 295;
+    let mut ry = 285;
     for r in report.repositories.iter().take(3) {
-        let rname = escape_xml(&r.name);
-        let lang = escape_xml(r.primary_language.as_deref().unwrap_or("—"));
-        repo_rows.push_str(&format!(
-            r##"<g transform="translate(500, {ry})">
-                <rect width="420" height="48" rx="6" fill="#161b22" stroke="#30363d" />
-                <text x="16" y="20" fill="#58a6ff" font-size="13" font-weight="600">{rname}</text>
-                <text x="16" y="37" fill="#8b949e" font-size="11">Language: {lang}</text>
-                <text x="404" y="28" fill="#f0f6fc" font-size="12" text-anchor="end">★ {stars}</text>
-            </g>"##,
-            stars = r.stars
+        let rname = escape_xml(&truncate_str(&r.name, 26));
+        let lang = escape_xml(&truncate_str(
+            r.primary_language.as_deref().unwrap_or("-"),
+            14,
         ));
-        ry += 58;
+        let state = if r.is_archived {
+            "ARCHIVED"
+        } else if r.is_fork {
+            "FORK"
+        } else {
+            "ACTIVE"
+        };
+        repo_rows.push_str(&format!(
+            r##"<g transform="translate(495, {ry})">
+                <rect width="425" height="46" fill="#ffffff" stroke="#e2e8f0" stroke-width="1" />
+                <text class="mono" x="12" y="18" fill="#0f172a" font-size="11" font-weight="600">{rname}</text>
+                <text class="mono" x="12" y="34" fill="#64748b" font-size="10">LANG: {lang} | STATE: {state}</text>
+                <text class="mono" x="413" y="26" fill="#0f172a" font-size="11" text-anchor="end">{stars} * / {forks} f</text>
+            </g>"##,
+            stars = r.stars,
+            forks = r.forks,
+        ));
+        ry += 52;
     }
     if report.repositories.is_empty() {
-        repo_rows.push_str(r##"<text x="500" y="310" fill="#8b949e" font-size="13">No public repositories cataloged</text>"##);
+        repo_rows.push_str(
+            r##"<g transform="translate(495, 285)">
+                <rect width="425" height="46" fill="#ffffff" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="4" />
+                <text class="mono" x="16" y="28" fill="#94a3b8" font-size="11">NO PUBLIC REPOSITORIES CATALOGED</text>
+            </g>"##
+        );
     }
 
-    // Provider status badges
     let mut status_badges = String::new();
-    let mut sx = 500;
-    for (name, status) in report.provider_status.iter().take(4) {
-        let p_name = escape_xml(name);
+    let mut sx = 40;
+    for (name, status) in report.provider_status.iter().take(5) {
+        let short_name = escape_xml(short_provider_name(name));
         let p_status = escape_xml(&status.status.to_string());
+        let (stroke_color, text_color) = match status.status {
+            ProviderHealth::Ok => ("#10b981", "#059669"),
+            ProviderHealth::Partial | ProviderHealth::RateLimited => ("#f59e0b", "#d97706"),
+            ProviderHealth::Skipped => ("#94a3b8", "#64748b"),
+            _ => ("#ef4444", "#dc2626"),
+        };
         status_badges.push_str(&format!(
-            r##"<g transform="translate({sx}, 490)">
-                <rect width="98" height="24" rx="4" fill="#21262d" />
-                <text x="49" y="16" fill="#c9d1d9" font-size="10" font-weight="500" text-anchor="middle">{p_name}: {p_status}</text>
+            r##"<g transform="translate({sx}, 472)">
+                <rect width="166" height="26" fill="#ffffff" stroke="#e2e8f0" stroke-width="1" />
+                <rect x="6" y="6" width="4" height="14" fill="{stroke_color}" />
+                <text class="mono" x="16" y="17" fill="#0f172a" font-size="9" font-weight="600">{short_name}</text>
+                <text class="mono" x="156" y="17" fill="{text_color}" font-size="9" font-weight="600" text-anchor="end">{p_status}</text>
             </g>"##
         ));
-        sx += 106;
+        sx += 178;
     }
+
+    let commits_scanned = report.coverage.commits_scanned;
+    let repos_scanned = report.coverage.repositories_scanned;
+    let git_inspected = if report.coverage.git_history_inspected {
+        "YES"
+    } else {
+        "NO"
+    };
 
     let svg = format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 560" width="960" height="560">
     <style>
-        .mono {{ font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }}
-        .sans {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }}
+        .mono {{ font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; }}
     </style>
-    <rect width="960" height="560" fill="#0d1117" rx="12" />
-    <rect x="1" y="1" width="958" height="558" fill="none" stroke="#30363d" stroke-width="1" rx="11" />
+    <!-- Background Canvas -->
+    <rect width="960" height="560" fill="#f8fafc" />
+    <rect x="20" y="20" width="920" height="520" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
 
-    <!-- Top Bar -->
-    <g transform="translate(40, 40)">
-        <text class="sans" x="0" y="24" fill="#58a6ff" font-size="22" font-weight="700" letter-spacing="1">SPOOR</text>
-        <text class="sans" x="90" y="24" fill="#8b949e" font-size="13">by Voldigoade</text>
-        <rect x="790" y="4" width="90" height="26" rx="4" fill="#1f6feb" fill-opacity="0.2" stroke="#388bfd" stroke-width="1" />
-        <text class="mono" x="835" y="21" fill="#58a6ff" font-size="11" font-weight="600" text-anchor="middle">{mode}</text>
+    <!-- Top Technical Header -->
+    <g transform="translate(40, 48)">
+        <text class="mono" x="0" y="0" fill="#0f172a" font-size="13" font-weight="700" letter-spacing="1.0">spoor audit ledger</text>
+        <text class="mono" x="200" y="0" fill="#64748b" font-size="11">public github metadata &amp; cryptographic keys</text>
+        <rect x="760" y="-12" width="120" height="20" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1" />
+        <text class="mono" x="820" y="2" fill="#0f172a" font-size="10" font-weight="600" text-anchor="middle">MODE: {mode}</text>
+    </g>
+    <line x1="40" y1="62" x2="920" y2="62" stroke="#e2e8f0" stroke-width="1" />
+
+    <!-- Target Metadata Strip -->
+    <g transform="translate(40, 84)">
+        <text class="mono" x="0" y="0" fill="#0f172a" font-size="15" font-weight="700">target: {target_display} [{target_type}]</text>
+        <text class="mono" x="0" y="18" fill="#64748b" font-size="10">display: {display_name} | url: {canonical_url} | generated: {generated}</text>
     </g>
 
-    <!-- Target Title Header -->
-    <g transform="translate(40, 90)">
-        <text class="sans" x="0" y="26" fill="#f0f6fc" font-size="24" font-weight="600">{target_display}</text>
-        <text class="sans" x="0" y="46" fill="#8b949e" font-size="13">{display_name} · {target_type} · Generated: {generated}</text>
+    <!-- Metrics Matrix Grid (5 blocks) -->
+    <g transform="translate(40, 122)">
+        <rect width="166" height="60" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1" />
+        <text class="mono" x="12" y="18" fill="#64748b" font-size="9" font-weight="600">REPOSITORIES</text>
+        <text class="mono" x="12" y="44" fill="#0f172a" font-size="18" font-weight="700">{repos_count}</text>
+
+        <rect x="178" width="166" height="60" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1" />
+        <text class="mono" x="190" y="18" fill="#64748b" font-size="9" font-weight="600">STARS ACCUMULATED</text>
+        <text class="mono" x="190" y="44" fill="#0f172a" font-size="18" font-weight="700">{total_stars}</text>
+
+        <rect x="356" width="166" height="60" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1" />
+        <text class="mono" x="368" y="18" fill="#64748b" font-size="9" font-weight="600">FORKS ACCUMULATED</text>
+        <text class="mono" x="368" y="44" fill="#0f172a" font-size="18" font-weight="700">{total_forks}</text>
+
+        <rect x="534" width="166" height="60" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1" />
+        <text class="mono" x="546" y="18" fill="#64748b" font-size="9" font-weight="600">OBSERVED IDENTITIES</text>
+        <text class="mono" x="546" y="44" fill="#0f172a" font-size="18" font-weight="700">{distinct_emails}</text>
+
+        <rect x="712" width="168" height="60" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1" />
+        <text class="mono" x="724" y="18" fill="#64748b" font-size="9" font-weight="600">PUBLIC KEYS</text>
+        <text class="mono" x="724" y="44" fill="#0f172a" font-size="18" font-weight="700">{keys_count}</text>
     </g>
 
-    <!-- Metrics Grid -->
-    <g transform="translate(40, 160)">
-        <rect width="168" height="74" rx="8" fill="#161b22" stroke="#30363d" />
-        <text class="sans" x="16" y="26" fill="#8b949e" font-size="11" font-weight="500">PUBLIC REPOSITORIES</text>
-        <text class="mono" x="16" y="55" fill="#f0f6fc" font-size="20" font-weight="600">{repos_count}</text>
+    <!-- Mid Section Titles -->
+    <text class="mono" x="40" y="210" fill="#334155" font-size="11" font-weight="700">OBSERVED IDENTITIES</text>
+    <text class="mono" x="495" y="210" fill="#334155" font-size="11" font-weight="700">REPOSITORIES &amp; COVERAGE</text>
 
-        <rect x="184" width="168" height="74" rx="8" fill="#161b22" stroke="#30363d" />
-        <text class="sans" x="200" y="26" fill="#8b949e" font-size="11" font-weight="500">TOTAL STARS</text>
-        <text class="mono" x="200" y="55" fill="#f0f6fc" font-size="20" font-weight="600">{total_stars}</text>
-
-        <rect x="368" width="168" height="74" rx="8" fill="#161b22" stroke="#30363d" />
-        <text class="sans" x="384" y="26" fill="#8b949e" font-size="11" font-weight="500">TOTAL FORKS</text>
-        <text class="mono" x="384" y="55" fill="#f0f6fc" font-size="20" font-weight="600">{total_forks}</text>
-
-        <rect x="552" width="168" height="74" rx="8" fill="#161b22" stroke="#30363d" />
-        <text class="sans" x="568" y="26" fill="#8b949e" font-size="11" font-weight="500">OBSERVED IDENTITIES</text>
-        <text class="mono" x="568" y="55" fill="#f0f6fc" font-size="20" font-weight="600">{distinct_emails}</text>
-
-        <rect x="736" width="144" height="74" rx="8" fill="#161b22" stroke="#30363d" />
-        <text class="sans" x="752" y="26" fill="#8b949e" font-size="11" font-weight="500">PUBLIC KEYS</text>
-        <text class="mono" x="752" y="55" fill="#f0f6fc" font-size="20" font-weight="600">{keys_count}</text>
+    <!-- Coverage Sub-Bar in Right Column -->
+    <g transform="translate(495, 222)">
+        <rect width="425" height="34" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1" />
+        <text class="mono" x="12" y="14" fill="#64748b" font-size="9">COMMITS SCANNED: <tspan fill="#0f172a" font-weight="600">{commits_scanned}</tspan> | REPOS: <tspan fill="#0f172a" font-weight="600">{repos_scanned}</tspan></text>
+        <text class="mono" x="12" y="26" fill="#64748b" font-size="9">GIT INSPECTION: <tspan fill="#0f172a" font-weight="600">{git_inspected}</tspan> | PROVENANCE: <tspan fill="#059669" font-weight="600">VERIFIED METADATA</tspan></text>
     </g>
 
-    <!-- Column Headers -->
-    <text class="sans" x="40" y="275" fill="#8b949e" font-size="12" font-weight="600">PUBLIC IDENTITIES (SAMPLED)</text>
-    <text class="sans" x="500" y="275" fill="#8b949e" font-size="12" font-weight="600">REPOSITORIES</text>
-
-    <!-- Rows -->
+    <!-- Table Rows -->
     {id_rows}
     {repo_rows}
 
-    <!-- Provider Statuses -->
-    <text class="sans" x="500" y="480" fill="#8b949e" font-size="11" font-weight="600">PROVIDER RECONNAISSANCE STATUS</text>
+    <!-- Provider Diagnostics Title -->
+    <text class="mono" x="40" y="460" fill="#334155" font-size="11" font-weight="700">PROVIDER HEALTH &amp; DIAGNOSTICS</text>
     {status_badges}
 
     <!-- Footer -->
-    <line x1="40" y1="525" x2="920" y2="525" stroke="#21262d" />
-    <text class="sans" x="40" y="545" fill="#6e7681" font-size="11">Spoor public GitHub footprint exploration · Sourced &amp; provenance-backed facts</text>
-    <text class="sans" x="920" y="545" fill="#6e7681" font-size="11" text-anchor="end">Spoor by Voldigoade</text>
+    <line x1="40" y1="510" x2="920" y2="510" stroke="#e2e8f0" stroke-width="1" />
+    <text class="mono" x="40" y="525" fill="#94a3b8" font-size="9">PROVENANCE: Public Git commit headers &amp; GitHub public API endpoints</text>
+    <text class="mono" x="920" y="525" fill="#94a3b8" font-size="9" text-anchor="end">ENGINE: Spoor by Voldigoade</text>
 </svg>"##
     );
 
@@ -179,5 +253,33 @@ mod tests {
         assert!(svg.contains("Spoor by Voldigoade"));
         assert!(svg.contains("Linus &amp; Friends &lt;linux&gt;"));
         assert!(!svg.contains("<linux>"));
+    }
+
+    #[test]
+    fn handles_long_strings_without_corrupting_svg() {
+        let mut report = Report::new(
+            Target::User {
+                username: "a-very-long-github-username-that-would-otherwise-overflow".into(),
+            },
+            AnalysisMode::Fast,
+        );
+        report.summary.display_name =
+            "A Extremely Long Display Name Designed To Test Boundary Checks Inside SVG Exporter"
+                .into();
+        report.identities.push(spoor_core::IdentityRecord {
+            name: Some("Long Contributor Name With Many Characters".into()),
+            email: "extremely.long.email.address.associated.with.corporate.entity@subdomain.example.com".into(),
+            email_type: spoor_core::EmailType::DomainEmail,
+            first_seen: None,
+            last_seen: None,
+            commits_observed: 42,
+            repositories: vec!["long-repo-name".into()],
+            sources: vec!["Git".into()],
+            is_verified_signer: true,
+        });
+
+        let svg = export_svg(&report).unwrap();
+        assert!(svg.contains("<svg"));
+        assert!(svg.contains("</svg>"));
     }
 }

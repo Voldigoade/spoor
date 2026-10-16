@@ -53,11 +53,10 @@ impl EphemeralIpRateLimiter {
         hasher.finish()
     }
 
-    pub fn check_and_record(&mut self, client_ip: &str) -> RateLimitResult {
+    pub fn check(&mut self, client_ip: &str) -> RateLimitResult {
         let now = Instant::now();
         let key = self.hash_ip(client_ip);
 
-        // Periodically purge stale entries
         if self.windows.len() > 1000 {
             self.windows.retain(|_, timestamps| {
                 timestamps.retain(|t| now.duration_since(*t) < self.window_duration);
@@ -78,9 +77,23 @@ impl EphemeralIpRateLimiter {
             };
             RateLimitResult::Exceeded { retry_after_secs }
         } else {
-            timestamps.push(now);
             RateLimitResult::Allowed
         }
+    }
+
+    pub fn record(&mut self, client_ip: &str) {
+        let now = Instant::now();
+        let key = self.hash_ip(client_ip);
+        let timestamps = self.windows.entry(key).or_default();
+        timestamps.push(now);
+    }
+
+    pub fn check_and_record(&mut self, client_ip: &str) -> RateLimitResult {
+        let res = self.check(client_ip);
+        if res.is_allowed() {
+            self.record(client_ip);
+        }
+        res
     }
 }
 
@@ -100,7 +113,7 @@ impl GlobalRateLimiter {
         }
     }
 
-    pub fn check_and_record(&mut self) -> RateLimitResult {
+    pub fn check(&mut self) -> RateLimitResult {
         let now = Instant::now();
         self.timestamps
             .retain(|t| now.duration_since(*t) < self.window_duration);
@@ -115,9 +128,20 @@ impl GlobalRateLimiter {
             };
             RateLimitResult::Exceeded { retry_after_secs }
         } else {
-            self.timestamps.push(now);
             RateLimitResult::Allowed
         }
+    }
+
+    pub fn record(&mut self) {
+        self.timestamps.push(Instant::now());
+    }
+
+    pub fn check_and_record(&mut self) -> RateLimitResult {
+        let res = self.check();
+        if res.is_allowed() {
+            self.record();
+        }
+        res
     }
 }
 
@@ -167,17 +191,18 @@ impl ServerRateLimiter {
     }
 
     pub fn check_and_record(&mut self, client_ip: &str) -> RateLimitResult {
-        // First check IP rate limit
-        let ip_res = self.ip_limiter.check_and_record(client_ip);
+        let global_res = self.global_limiter.check();
+        if !global_res.is_allowed() {
+            return global_res;
+        }
+
+        let ip_res = self.ip_limiter.check(client_ip);
         if !ip_res.is_allowed() {
             return ip_res;
         }
 
-        // Then check global rate limit
-        let global_res = self.global_limiter.check_and_record();
-        if !global_res.is_allowed() {
-            return global_res;
-        }
+        self.global_limiter.record();
+        self.ip_limiter.record(client_ip);
 
         RateLimitResult::Allowed
     }

@@ -8,8 +8,8 @@ use spoor_core::SpoorError;
 
 use self::graphql::GitHubGraphQLClient;
 use self::models::{
-    GhCommitItem, GhCommunityProfile, GhEventBatch, GhGpgKey, GhRepo, GhSshKey, GhTreeResponse,
-    GhUser,
+    GhCommitItem, GhCommitSearchResult, GhCommunityProfile, GhEventBatch, GhGpgKey, GhRepo,
+    GhSshKey, GhTreeResponse, GhUser,
 };
 use self::rest::GitHubRestClient;
 use crate::client::HttpClient;
@@ -108,5 +108,32 @@ impl GitHubProvider {
         branch: &str,
     ) -> Result<GhTreeResponse, SpoorError> {
         self.rest.get_repo_tree(owner, repo, branch).await
+    }
+
+    pub async fn search_commits(
+        &self,
+        query: &str,
+        page: usize,
+        per_page: usize,
+        sort: Option<&str>,
+    ) -> Result<GhCommitSearchResult, SpoorError> {
+        self.rest.search_commits(query, page, per_page, sort).await
+    }
+
+    pub async fn fetch_user_contributions(
+        &self,
+        username: &str,
+    ) -> Result<Vec<graphql::GhGraphQLContributionByRepo>, SpoorError> {
+        self.graphql.get_user_commit_contributions(username).await
+    }
+
+    pub async fn fetch_user_contributions_historical(
+        &self,
+        username: &str,
+        max_historical_years: usize,
+    ) -> Result<graphql::HistoricalContributionsResult, SpoorError> {
+        self.graphql
+            .get_user_commit_contributions_historical(username, max_historical_years)
+            .await
     }
 }

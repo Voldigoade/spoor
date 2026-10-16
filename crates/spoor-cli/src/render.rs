@@ -235,6 +235,44 @@ pub fn render_terminal_report(report: &Report) {
     }
     println!();
 
+    if !report.related_commit_actors.is_empty() {
+        println!(
+            "{}",
+            bold("── RELATED COMMIT ACTORS (REPOSITORY CONTRIBUTORS & CO-AUTHORS) ────────")
+        );
+        for (i, actor) in report.related_commit_actors.iter().enumerate().take(10) {
+            let name_str = actor.name.as_deref().unwrap_or("—");
+            println!(
+                "  [{}] {} {}",
+                i + 1,
+                dim(&actor.email),
+                dim(format!("({})", actor.relationship))
+            );
+            let repos_info = if !actor.repositories.is_empty() {
+                format!(" · Repos: {}", actor.repositories.join(", "))
+            } else {
+                String::new()
+            };
+            println!(
+                "      Actor: {} · Commits: {} · Sources: {}{}",
+                name_str,
+                actor.commits_observed,
+                dim(actor.sources.join(", ")),
+                dim(repos_info)
+            );
+        }
+        if report.related_commit_actors.len() > 10 {
+            println!(
+                "  {}",
+                dim(format!(
+                    "... and {} additional related commit actors",
+                    report.related_commit_actors.len() - 10
+                ))
+            );
+        }
+        println!();
+    }
+
     println!(
         "{}",
         bold("── REPOSITORIES (SAMPLE) ────────────────────────────────────────────────")
@@ -311,13 +349,30 @@ pub fn render_terminal_report(report: &Report) {
     } else {
         green("COMPLETE")
     };
-    println!(
-        "  Coverage: {} ({} commits, {}/{} repos)",
-        cov_state,
-        report.coverage.commits_scanned,
-        report.coverage.repositories_scanned,
-        report.coverage.repositories_total
-    );
+    if report.coverage.owned_repositories_total > 0
+        || report.coverage.external_repositories_discovered > 0
+    {
+        println!(
+            "  Coverage: {} ({} commits, Owned: {}/{}, External: {}/{})",
+            cov_state,
+            report.coverage.commits_scanned,
+            report.coverage.owned_repositories_scanned,
+            report.coverage.owned_repositories_total,
+            report.coverage.external_repositories_scanned,
+            report.coverage.external_repositories_discovered
+        );
+    } else {
+        println!(
+            "  Coverage: {} ({} commits, {}/{} repos)",
+            cov_state,
+            report.coverage.commits_scanned,
+            report.coverage.repositories_scanned,
+            report.coverage.repositories_total
+        );
+    }
+    if let Some(notes) = &report.coverage.notes {
+        println!("  {}", dim(format!("Notes: {}", notes)));
+    }
 
     for (p, st) in &report.provider_status {
         let st_badge = match st.status {

@@ -1,7 +1,7 @@
 use std::io::{self, Write};
 use std::sync::Arc;
 
-use spoor_core::{AnalysisMode, CacheStore, Report, SpoorEvent, Target};
+use spoor_core::{AnalysisMode, AnalysisOptions, CacheStore, Report, SpoorEvent, Target};
 use spoor_export::{export_bytes, ExportFormat};
 use spoor_providers::AnalysisEngine;
 use tokio::sync::mpsc;
@@ -71,7 +71,7 @@ pub async fn run_repl(engine: Arc<AnalysisEngine>, cache: Arc<dyn CacheStore>) {
                 println!("  * GitHub REST API:    Active");
                 println!("  * GitHub GraphQL:     Active");
                 println!("  * GitHub Auth Token:  {token_status}");
-                println!("  * GitLeak API:        Active (50 req/hr quota, DEEP mode only)\n");
+                println!("  * GitLeak API:        Active (50 req/hr quota, optional enrichment via --enrich)\n");
             }
             "cache" => {
                 let sub = parts.get(1).map(|s| s.to_lowercase());
@@ -102,11 +102,17 @@ pub async fn run_repl(engine: Arc<AnalysisEngine>, cache: Arc<dyn CacheStore>) {
                     continue;
                 }
                 let target_arg = parts[1];
-                let deep = parts.iter().any(|&p| p == "--deep" || p == "-d");
-                let mode = if deep {
-                    AnalysisMode::Deep
-                } else {
-                    AnalysisMode::Fast
+                let deep = parts
+                    .iter()
+                    .any(|&p| p == "--deep" || p == "-d" || p == "deep");
+                let enrich = parts.contains(&"--enrich");
+                let options = AnalysisOptions {
+                    mode: if deep {
+                        AnalysisMode::Deep
+                    } else {
+                        AnalysisMode::Fast
+                    },
+                    enrich,
                 };
 
                 match Target::parse(target_arg) {
@@ -119,7 +125,7 @@ pub async fn run_repl(engine: Arc<AnalysisEngine>, cache: Arc<dyn CacheStore>) {
                             }
                         });
 
-                        match engine.run_analysis(&target, mode, Some(tx)).await {
+                        match engine.run_analysis(&target, options, Some(tx)).await {
                             Ok(report) => {
                                 let _ = event_printer.await;
                                 render_terminal_report(&report);
@@ -198,16 +204,20 @@ pub async fn run_repl(engine: Arc<AnalysisEngine>, cache: Arc<dyn CacheStore>) {
 
 fn print_repl_help() {
     println!("{}", bold("Available Commands:"));
-    println!("  inspect <target> [--deep]   Inspect user, profile URL, repo shorthand, or URL");
-    println!("  user <username> [--deep]    Inspect a GitHub user profile");
-    println!("  repo <owner/repo>           Inspect a GitHub repository");
+    println!("  inspect <target> [--mode fast|deep] [--deep] [--enrich]  Inspect user or repo");
+    println!("  user <username> [--deep]                                 Inspect GitHub user");
+    println!("  repo <owner/repo>                                        Inspect GitHub repo");
+    println!("  export <format> [filename]                               Export last report (text, json, md, pdf, svg)");
     println!(
-        "  export <format> [filename]  Export last generated report (json, md, txt, svg, pdf)"
+        "  providers                                                Provider status & token limits"
     );
-    println!("  providers                   Display provider status and token rate limits");
-    println!("  cache [stats|clear]         Inspect or clear local SQLite cache");
-    println!("  clear                       Clear terminal screen");
-    println!("  about                       Show project information");
-    println!("  help                        Display this command manual");
-    println!("  quit, exit                  Exit interactive mode\n");
+    println!(
+        "  cache [stats|clear]                                      Inspect or clear local cache"
+    );
+    println!("  clear                                                    Clear screen");
+    println!("  about                                                    Show project information");
+    println!(
+        "  help                                                     Display this command manual"
+    );
+    println!("  quit, exit                                               Exit interactive mode\n");
 }

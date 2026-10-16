@@ -7,6 +7,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   check-format:
     name: Format Check
@@ -21,6 +24,7 @@ jobs:
           node-version: 24
       - run: node scripts/check-prose.mjs
       - run: cargo fmt --check
+      - run: npm --prefix packages/spoor-client run build
 
   clippy:
     name: Clippy Lint
@@ -45,9 +49,20 @@ jobs:
       - run: cargo test --workspace --all-features
       - run: cargo build --release
 
+  msrv:
+    name: MSRV Check (Rust 1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - run: cargo check --workspace --all-targets --all-features --locked
+
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v7
       - uses: rustsec/audit-check@v2

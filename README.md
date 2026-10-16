@@ -26,19 +26,19 @@ cargo build --release
 Targets can be usernames, `owner/repo`, GitHub profile URLs or repository URLs. Other hosts, URL credentials and traversal paths are rejected.
 
 ```sh
-spoor inspect torvalds
-spoor inspect torvalds --deep
+spoor torvalds
+spoor inspect Voldigoade --mode deep --format markdown -o report.md
 spoor repo torvalds/linux
 spoor export report.json --format pdf -o report.pdf
 spoor cache stats
 spoor cache clear
 ```
 
-Run `spoor` without arguments for the interactive prompt. Version 0.1.4 supports `inspect`, `repo`, `export`, `help` and `quit` there.
+Run `spoor` without arguments for the interactive prompt. Version 0.2.0 supports `inspect`, `user`, `repo`, `export`, `providers`, `cache`, `clear`, `about`, `help` and `quit` there.
 
 ## Modes
 
-FAST is the default. For user targets it samples up to 30 commits from each of 3 repositories, preferring non-forks. Enriched FAST keeps those bounds and requests GitLeak data through the HTTP option `enrich: true`. DEEP samples up to 50 commits from each of 8 repositories and requests enrichment. Repository targets do not query GitLeak.
+FAST is the default. It queries the user profile, cataloged repositories, public events (past 30 days, up to 300 events), global commit search, and inspects commits across discovered candidate repositories. DEEP mode broadens discovery with GraphQL contributions, higher commit budgets, and sandboxed bare git history inspection (`--bare --filter=blob:none`). Optional GitLeak enrichment can be toggled via `--enrich` (CLI) or `enrich: true` (HTTP). Repository targets do not query GitLeak.
 
 GitHub supplies profile data, repositories, commit headers, public activity and keys. GraphQL is used when a token is available. Optional GitLeak data is cached and subject to a separate upstream budget; unavailable enrichment does not discard the GitHub report.
 
