@@ -224,8 +224,8 @@ impl GitInspector {
             }
         })?;
 
-        let mut cmd = tokio::process::Command::new("git");
-        cmd.arg("-c")
+        let clone_cmd = crate::process_tree::ProcessCommand::new("git")
+            .arg("-c")
             .arg("core.hooksPath=/dev/null")
             .arg("-c")
             .arg("credential.helper=")
@@ -233,33 +233,23 @@ impl GitInspector {
             .arg("--bare")
             .arg("--filter=blob:none")
             .arg(&clone_url)
-            .arg(&repo_dir)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped());
+            .arg(repo_dir.to_string_lossy().to_string())
+            .capture_stdout(false)
+            .capture_stderr(true);
 
-        clone_session.prepare_command(&mut cmd);
-
-        let mut child = cmd.spawn().map_err(|e| SpoorError::ProviderError {
-            provider: "git".to_string(),
-            message: format!("Failed to spawn git clone: {e}"),
-        })?;
-
-        clone_session
-            .attach_child(&child)
-            .map_err(|e| SpoorError::ProviderError {
-                provider: "git".to_string(),
-                message: format!("Failed to attach git clone to process tree session: {e}"),
-            })?;
-
-        let stderr = child.stderr.take();
-        let stderr_handle = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Some(mut r) = stderr {
-                use tokio::io::AsyncReadExt;
-                let _ = r.read_to_end(&mut buf).await;
+        let mut clone_child = clone_session.spawn(clone_cmd).map_err(|e| {
+            if let Err(cleanup_err) = temp_guard.cleanup() {
+                warn!(
+                    path = %temp_guard.path().display(),
+                    error = %cleanup_err,
+                    "Failed to clean up temporary directory after git clone spawn failure"
+                );
             }
-            buf
-        });
+            SpoorError::ProviderError {
+                provider: "git".to_string(),
+                message: format!("Failed to spawn git clone: {e}"),
+            }
+        })?;
 
         let max_budget = self.max_bytes_budget;
         let repo_dir_clone = repo_dir.clone();
@@ -280,15 +270,12 @@ impl GitInspector {
                             });
                         }
                     }
-                    status = child.wait() => {
+                    status = clone_child.wait() => {
                         let exit_status = status.map_err(|e| SpoorError::ProviderError {
                             provider: "git".to_string(),
                             message: format!("Failed to wait for git clone: {e}"),
                         })?;
-                        let stderr_bytes = match tokio::time::timeout(Duration::from_millis(500), stderr_handle).await {
-                            Ok(Ok(bytes)) => bytes,
-                            _ => Vec::new(),
-                        };
+                        let (_stdout_bytes, stderr_bytes) = clone_child.take_output().await;
                         if !exit_status.success() {
                             let stderr_str = String::from_utf8_lossy(&stderr_bytes);
                             warn!(owner = %owner, repo = %repo, stderr = %stderr_str, "Git clone exited with error");
@@ -311,16 +298,28 @@ impl GitInspector {
             }
             Ok(Err(e)) => {
                 clone_session.terminate();
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                let _ = temp_guard.cleanup();
+                let _ = clone_child.kill().await;
+                let _ = clone_child.wait().await;
+                if let Err(cleanup_err) = temp_guard.cleanup() {
+                    warn!(
+                        path = %temp_guard.path().display(),
+                        error = %cleanup_err,
+                        "Failed to clean up temporary directory after git clone failure"
+                    );
+                }
                 return Err(e);
             }
             Err(_) => {
                 clone_session.terminate();
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                let _ = temp_guard.cleanup();
+                let _ = clone_child.kill().await;
+                let _ = clone_child.wait().await;
+                if let Err(cleanup_err) = temp_guard.cleanup() {
+                    warn!(
+                        path = %temp_guard.path().display(),
+                        error = %cleanup_err,
+                        "Failed to clean up temporary directory after git clone timeout"
+                    );
+                }
                 return Err(SpoorError::Timeout {
                     provider: "git".to_string(),
                     timeout_secs: self.timeout_duration.as_secs(),
@@ -339,52 +338,30 @@ impl GitInspector {
             }
         })?;
 
-        let mut log_cmd = tokio::process::Command::new("git");
-        log_cmd
+        let log_cmd = crate::process_tree::ProcessCommand::new("git")
             .arg("-C")
-            .arg(&repo_dir)
+            .arg(repo_dir.to_string_lossy().to_string())
             .arg("--no-pager")
             .arg("log")
             .arg("--all")
             .arg(&max_arg)
             .arg(format_arg)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .capture_stdout(true)
+            .capture_stderr(true);
 
-        log_session.prepare_command(&mut log_cmd);
-
-        let mut log_child = log_cmd.spawn().map_err(|e| SpoorError::ProviderError {
-            provider: "git".to_string(),
-            message: format!("Failed to spawn git log: {e}"),
-        })?;
-
-        log_session
-            .attach_child(&log_child)
-            .map_err(|e| SpoorError::ProviderError {
+        let mut log_child = log_session.spawn(log_cmd).map_err(|e| {
+            if let Err(cleanup_err) = temp_guard.cleanup() {
+                warn!(
+                    path = %temp_guard.path().display(),
+                    error = %cleanup_err,
+                    "Failed to clean up temporary directory after git log spawn failure"
+                );
+            }
+            SpoorError::ProviderError {
                 provider: "git".to_string(),
-                message: format!("Failed to attach git log to process tree session: {e}"),
-            })?;
-
-        let stdout = log_child.stdout.take();
-        let stderr = log_child.stderr.take();
-
-        let stdout_handle = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Some(mut r) = stdout {
-                use tokio::io::AsyncReadExt;
-                let _ = r.read_to_end(&mut buf).await;
+                message: format!("Failed to spawn git log: {e}"),
             }
-            buf
-        });
-
-        let stderr_handle = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Some(mut r) = stderr {
-                use tokio::io::AsyncReadExt;
-                let _ = r.read_to_end(&mut buf).await;
-            }
-            buf
-        });
+        })?;
 
         let log_wait_future = async {
             let status = log_child
@@ -394,16 +371,7 @@ impl GitInspector {
                     provider: "git".to_string(),
                     message: format!("Failed to wait for git log: {e}"),
                 })?;
-            let stdout_bytes =
-                match tokio::time::timeout(Duration::from_millis(500), stdout_handle).await {
-                    Ok(Ok(bytes)) => bytes,
-                    _ => Vec::new(),
-                };
-            let stderr_bytes =
-                match tokio::time::timeout(Duration::from_millis(500), stderr_handle).await {
-                    Ok(Ok(bytes)) => bytes,
-                    _ => Vec::new(),
-                };
+            let (stdout_bytes, stderr_bytes) = log_child.take_output().await;
             Ok((status, stdout_bytes, stderr_bytes))
         };
 
@@ -414,7 +382,13 @@ impl GitInspector {
                     log_session.terminate();
                     let _ = log_child.kill().await;
                     let _ = log_child.wait().await;
-                    let _ = temp_guard.cleanup();
+                    if let Err(cleanup_err) = temp_guard.cleanup() {
+                        warn!(
+                            path = %temp_guard.path().display(),
+                            error = %cleanup_err,
+                            "Failed to clean up temporary directory after git log timeout"
+                        );
+                    }
                     return Err(SpoorError::Timeout {
                         provider: "git".to_string(),
                         timeout_secs: self.timeout_duration.as_secs(),
@@ -426,7 +400,13 @@ impl GitInspector {
 
         if !log_status.success() {
             let stderr_str = String::from_utf8_lossy(&stderr_bytes);
-            let _ = temp_guard.cleanup();
+            if let Err(cleanup_err) = temp_guard.cleanup() {
+                warn!(
+                    path = %temp_guard.path().display(),
+                    error = %cleanup_err,
+                    "Failed to clean up temporary directory after git log failure"
+                );
+            }
             return Err(SpoorError::ProviderError {
                 provider: "git".to_string(),
                 message: format!("git log failed: {}", stderr_str.trim()),
@@ -476,6 +456,15 @@ impl GitInspector {
                 });
             }
         }
+
+        temp_guard
+            .cleanup()
+            .map_err(|e| SpoorError::ProviderError {
+                provider: "git".to_string(),
+                message: format!(
+                    "Failed to clean up temporary directory after successful git inspection: {e}"
+                ),
+            })?;
 
         debug!(owner = %owner, repo = %repo, count = records.len(), "Parsed commits from bare git clone");
         Ok(records)
