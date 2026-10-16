@@ -508,17 +508,46 @@ pub fn export_pdf(report: &Report) -> Result<Vec<u8>, SpoorError> {
         "Commits Scanned",
         &report.coverage.commits_scanned.to_string(),
     );
-    engine.add_key_value(
-        "Repositories Scanned",
-        &format!(
-            "{}/{}",
-            report.coverage.repositories_scanned, report.coverage.repositories_total
-        ),
-    );
-    engine.add_key_value(
-        "Candidate Repositories Found",
-        &report.coverage.candidate_repositories_found.to_string(),
-    );
+    if report.coverage.owned_repositories_total > 0
+        || report.coverage.external_repositories_discovered > 0
+    {
+        engine.add_key_value(
+            "Owned Repositories Scanned",
+            &format!(
+                "{}/{}",
+                report.coverage.owned_repositories_scanned,
+                report.coverage.owned_repositories_total
+            ),
+        );
+        engine.add_key_value(
+            "External Repositories Scanned",
+            &format!(
+                "{}/{}",
+                report.coverage.external_repositories_scanned,
+                report.coverage.external_repositories_discovered
+            ),
+        );
+        engine.add_key_value(
+            "Candidate Repositories Scanned",
+            &format!(
+                "{}/{}",
+                report.coverage.candidate_repositories_scanned,
+                report.coverage.candidate_repositories_total
+            ),
+        );
+    } else {
+        engine.add_key_value(
+            "Repositories Scanned",
+            &format!(
+                "{}/{}",
+                report.coverage.repositories_scanned, report.coverage.repositories_total
+            ),
+        );
+        engine.add_key_value(
+            "Candidate Repositories Found",
+            &report.coverage.candidate_repositories_found.to_string(),
+        );
+    }
     engine.add_key_value(
         "Global Commits Found",
         &report.coverage.global_commits_found.to_string(),
@@ -578,7 +607,38 @@ pub fn export_pdf(report: &Report) -> Result<Vec<u8>, SpoorError> {
         }
     }
 
-    engine.add_section_header("4. PUBLIC REPOSITORIES");
+    let mut section_idx = 4;
+    if !report.related_commit_actors.is_empty() {
+        engine.add_section_header(&format!(
+            "{section_idx}. RELATED COMMIT ACTORS (REPOSITORY CONTRIBUTORS & CO-AUTHORS)"
+        ));
+        section_idx += 1;
+        let actor_cols = [
+            ("EMAIL", 185.0),
+            ("COMMITS", 60.0),
+            ("RELATIONSHIP", 140.0),
+            ("REPOSITORIES", 120.0),
+        ];
+        engine.add_table_header(&actor_cols);
+        for actor in report.related_commit_actors.iter().take(30) {
+            let commits_str = actor.commits_observed.to_string();
+            let repos_str = if actor.repositories.is_empty() {
+                "-".to_string()
+            } else {
+                actor.repositories.join(", ")
+            };
+            let row = [
+                (actor.email.as_str(), 185.0, true),
+                (commits_str.as_str(), 60.0, false),
+                (actor.relationship.as_str(), 140.0, false),
+                (repos_str.as_str(), 120.0, false),
+            ];
+            engine.add_table_row(&row);
+        }
+    }
+
+    engine.add_section_header(&format!("{section_idx}. PUBLIC REPOSITORIES"));
+    section_idx += 1;
     let repo_cols = [
         ("REPOSITORY", 200.0),
         ("LANGUAGE", 110.0),
@@ -625,7 +685,10 @@ pub fn export_pdf(report: &Report) -> Result<Vec<u8>, SpoorError> {
     }
 
     if !report.keys.is_empty() {
-        engine.add_section_header("5. PUBLIC KEYS & AUTHENTICATION MATERIAL");
+        engine.add_section_header(&format!(
+            "{section_idx}. PUBLIC KEYS & AUTHENTICATION MATERIAL"
+        ));
+        section_idx += 1;
         for k in &report.keys {
             let key_label = format!("[{}]", k.key_type);
             let key_val = format!(
@@ -638,13 +701,15 @@ pub fn export_pdf(report: &Report) -> Result<Vec<u8>, SpoorError> {
     }
 
     if !report.inferences.is_empty() {
-        engine.add_section_header("6. INFERENCES");
+        engine.add_section_header(&format!("{section_idx}. INFERENCES"));
+        section_idx += 1;
         for inf in &report.inferences {
             engine.add_key_value(&inf.topic, &inf.inference);
         }
     }
 
-    engine.add_section_header("7. PROVIDER STATUS & HEALTH");
+    engine.add_section_header(&format!("{section_idx}. PROVIDER STATUS & HEALTH"));
+    section_idx += 1;
     let provider_cols = [
         ("PROVIDER", 190.0),
         ("HEALTH", 90.0),
@@ -669,7 +734,7 @@ pub fn export_pdf(report: &Report) -> Result<Vec<u8>, SpoorError> {
     }
 
     if !report.limitations.is_empty() {
-        engine.add_section_header("8. INHERENT LIMITATIONS");
+        engine.add_section_header(&format!("{section_idx}. INHERENT LIMITATIONS"));
         for lim in &report.limitations {
             let bullet = format!("* {lim}");
             let lines = wrap_text(&bullet, 110);

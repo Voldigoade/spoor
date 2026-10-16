@@ -87,7 +87,7 @@ pub fn classify_email(email: &str, profile_public_email: Option<&str>) -> EmailT
     EmailType::Unknown
 }
 
-fn is_github_platform_system(email: &str) -> bool {
+pub fn is_github_platform_system(email: &str) -> bool {
     // Exact web-flow committer used by GitHub for UI merges and edits
     if email == "noreply@github.com" {
         return true;

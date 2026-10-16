@@ -428,8 +428,9 @@ async fn test_engine_user_deep_flow_with_gitleak_and_repo_hygiene() {
         .expect("Languages must be populated for scanned repo");
     assert_eq!(langs.get("Rust"), Some(&50000));
 
-    // We expect: bob@company.com, noreply@github.com, and user@example.com
-    assert_eq!(report.identities.len(), 3);
+    // We expect 2 target identities: bob@company.com and user@example.com (from GitLeak).
+    // noreply@github.com is a platform bot address and is separated into related_commit_actors.
+    assert_eq!(report.identities.len(), 2);
 
     // bob@company.com: author == committer, commits_observed must be 1 (NOT 2)
     let bob_id = report
@@ -444,14 +445,15 @@ async fn test_engine_user_deep_flow_with_gitleak_and_repo_hygiene() {
     assert_eq!(bob_id.repositories, vec!["bob/secure-app"]);
     assert_eq!(bob_id.email_type, EmailType::DomainEmail);
 
-    // noreply@github.com: must be classified as GitHubSystem
-    let sys_id = report
-        .identities
+    // noreply@github.com: must be in related_commit_actors classified as platform_bot
+    let sys_actor = report
+        .related_commit_actors
         .iter()
         .find(|i| i.email == "noreply@github.com")
         .unwrap();
-    assert_eq!(sys_id.email_type, EmailType::GitHubSystem);
-    assert!(sys_id.email_type.is_platform_system());
+    assert_eq!(sys_actor.email_type, EmailType::GitHubSystem);
+    assert!(sys_actor.email_type.is_platform_system());
+    assert_eq!(sys_actor.relationship, "platform_bot");
 
     // user@example.com: must preserve GitLeak finding, committer name, and extracted repo
     let gl_id = report

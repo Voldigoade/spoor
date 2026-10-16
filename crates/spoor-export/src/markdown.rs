@@ -172,6 +172,55 @@ pub fn export_markdown(report: &Report) -> Result<String, SpoorError> {
         writeln!(out, "\n> [!NOTE]\n> Email addresses listed above were observed in public Git commit headers or public profile attributes. They do not assert private contact status.\n").unwrap();
     }
 
+    if !report.related_commit_actors.is_empty() {
+        writeln!(out, "## Related Commit Actors\n").unwrap();
+        writeln!(out, "> [!NOTE]\n> The following actors were observed in commits across target or related repositories, but lack sufficient attribution evidence to be classified as verified target identities.\n").unwrap();
+        writeln!(
+            out,
+            "| Name | Email | Relationship | Commits | Repositories | First Seen | Last Seen |"
+        )
+        .unwrap();
+        writeln!(out, "| :--- | :--- | :--- | :--- | :--- | :--- | :--- |").unwrap();
+        for actor in report.related_commit_actors.iter().take(50) {
+            let name_str = actor.name.as_deref().unwrap_or("—");
+            let first_str = actor
+                .first_seen
+                .map(|d| d.format("%Y-%m-%d").to_string())
+                .unwrap_or_else(|| "—".into());
+            let last_str = actor
+                .last_seen
+                .map(|d| d.format("%Y-%m-%d").to_string())
+                .unwrap_or_else(|| "—".into());
+            let repos_str = if actor.repositories.is_empty() {
+                "—".to_string()
+            } else {
+                actor.repositories.join(", ")
+            };
+            writeln!(
+                out,
+                "| {} | `{}` | {} | {} | {} | {} | {} |",
+                name_str,
+                actor.email,
+                actor.relationship,
+                actor.commits_observed,
+                repos_str,
+                first_str,
+                last_str
+            )
+            .unwrap();
+        }
+        if report.related_commit_actors.len() > 50 {
+            writeln!(
+                out,
+                "\n*(Displaying top 50 of {} related commit actors)*\n",
+                report.related_commit_actors.len()
+            )
+            .unwrap();
+        } else {
+            writeln!(out).unwrap();
+        }
+    }
+
     writeln!(out, "## Repositories\n").unwrap();
     if report.repositories.is_empty() {
         writeln!(out, "*No repositories listed.*\n").unwrap();
@@ -300,24 +349,49 @@ pub fn export_markdown(report: &Report) -> Result<String, SpoorError> {
         report.coverage.commits_scanned
     )
     .unwrap();
-    writeln!(
-        out,
-        "| Repositories Scanned | {} |",
-        report.coverage.repositories_scanned
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "| Repositories Total | {} |",
-        report.coverage.repositories_total
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "| Candidate Repositories Found | {} |",
-        report.coverage.candidate_repositories_found
-    )
-    .unwrap();
+    if report.coverage.owned_repositories_total > 0
+        || report.coverage.external_repositories_discovered > 0
+    {
+        writeln!(
+            out,
+            "| Owned Repositories Scanned | {}/{} |",
+            report.coverage.owned_repositories_scanned, report.coverage.owned_repositories_total
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "| External Repositories Scanned | {}/{} |",
+            report.coverage.external_repositories_scanned,
+            report.coverage.external_repositories_discovered
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "| Candidate Repositories Scanned | {}/{} |",
+            report.coverage.candidate_repositories_scanned,
+            report.coverage.candidate_repositories_total
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            out,
+            "| Repositories Scanned | {} |",
+            report.coverage.repositories_scanned
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "| Repositories Total | {} |",
+            report.coverage.repositories_total
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "| Candidate Repositories Found | {} |",
+            report.coverage.candidate_repositories_found
+        )
+        .unwrap();
+    }
     writeln!(
         out,
         "| Global Commits Found | {} |",

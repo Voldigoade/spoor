@@ -80,6 +80,22 @@ pub struct IdentityRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelatedActorRecord {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub email: String,
+    pub email_type: EmailType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_seen: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<DateTime<Utc>>,
+    pub commits_observed: usize,
+    pub repositories: Vec<String>,
+    pub sources: Vec<String>,
+    pub relationship: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InferenceRecord {
     pub topic: String,
     pub inference: String,
@@ -273,6 +289,18 @@ pub struct CoverageRecord {
     pub repositories_scanned: usize,
     pub repositories_total: usize,
     #[serde(default)]
+    pub owned_repositories_total: usize,
+    #[serde(default)]
+    pub owned_repositories_scanned: usize,
+    #[serde(default)]
+    pub external_repositories_discovered: usize,
+    #[serde(default)]
+    pub external_repositories_scanned: usize,
+    #[serde(default)]
+    pub candidate_repositories_total: usize,
+    #[serde(default)]
+    pub candidate_repositories_scanned: usize,
+    #[serde(default)]
     pub candidate_repositories_found: usize,
     #[serde(default)]
     pub global_commits_found: usize,
@@ -313,6 +341,8 @@ pub struct Report {
     pub repositories: Vec<RepoReport>,
     pub activity: ActivityReport,
     pub identities: Vec<IdentityRecord>,
+    #[serde(default)]
+    pub related_commit_actors: Vec<RelatedActorRecord>,
     pub keys: Vec<KeyRecord>,
     pub inferences: Vec<InferenceRecord>,
     pub provider_status: HashMap<String, ProviderStatus>,
@@ -339,6 +369,7 @@ impl Report {
                 ..Default::default()
             },
             identities: Vec::new(),
+            related_commit_actors: Vec::new(),
             keys: Vec::new(),
             inferences: Vec::new(),
             provider_status: HashMap::new(),

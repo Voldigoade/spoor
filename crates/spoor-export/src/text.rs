@@ -152,6 +152,36 @@ pub fn export_text(report: &Report) -> Result<String, SpoorError> {
         }
     }
 
+    if !report.related_commit_actors.is_empty() {
+        writeln!(out, "{sub_divider}").unwrap();
+        writeln!(
+            out,
+            "RELATED COMMIT ACTORS (Repository Contributors & Co-Authors)"
+        )
+        .unwrap();
+        writeln!(out, "{sub_divider}").unwrap();
+        for (i, actor) in report.related_commit_actors.iter().enumerate().take(25) {
+            writeln!(out, "[{}] Email:        {}", i + 1, actor.email).unwrap();
+            if let Some(name) = &actor.name {
+                writeln!(out, "    Name:         {}", name).unwrap();
+            }
+            writeln!(out, "    Relation:     {}", actor.relationship).unwrap();
+            writeln!(out, "    Commits:      {}", actor.commits_observed).unwrap();
+            if !actor.repositories.is_empty() {
+                writeln!(out, "    Repos:        {}", actor.repositories.join(", ")).unwrap();
+            }
+            writeln!(out).unwrap();
+        }
+        if report.related_commit_actors.len() > 25 {
+            writeln!(
+                out,
+                "... and {} additional related commit actors\n",
+                report.related_commit_actors.len() - 25
+            )
+            .unwrap();
+        }
+    }
+
     writeln!(out, "{sub_divider}").unwrap();
     writeln!(out, "PUBLIC REPOSITORIES (Sample)").unwrap();
     writeln!(out, "{sub_divider}").unwrap();
@@ -216,26 +246,55 @@ pub fn export_text(report: &Report) -> Result<String, SpoorError> {
     writeln!(out, "{sub_divider}").unwrap();
     writeln!(out, "COVERAGE & PROVIDER STATUS").unwrap();
     writeln!(out, "{sub_divider}").unwrap();
-    writeln!(
-        out,
-        "Coverage: {} (Commits: {}, Repos: {}/{}, Candidates: {}, Global Commits: {}, Git Inspect: {})",
-        if report.coverage.is_partial {
-            "PARTIAL"
-        } else {
-            "COMPLETE"
-        },
-        report.coverage.commits_scanned,
-        report.coverage.repositories_scanned,
-        report.coverage.repositories_total,
-        report.coverage.candidate_repositories_found,
-        report.coverage.global_commits_found,
-        if report.coverage.git_history_inspected {
-            "YES"
-        } else {
-            "NO"
-        }
-    )
-    .unwrap();
+    if report.coverage.owned_repositories_total > 0
+        || report.coverage.external_repositories_discovered > 0
+    {
+        writeln!(
+            out,
+            "Coverage: {} (Commits: {}, Owned Repos: {}/{}, External Repos: {}/{}, Global Commits: {}, Git Inspect: {})",
+            if report.coverage.is_partial {
+                "PARTIAL"
+            } else {
+                "COMPLETE"
+            },
+            report.coverage.commits_scanned,
+            report.coverage.owned_repositories_scanned,
+            report.coverage.owned_repositories_total,
+            report.coverage.external_repositories_scanned,
+            report.coverage.external_repositories_discovered,
+            report.coverage.global_commits_found,
+            if report.coverage.git_history_inspected {
+                "YES"
+            } else {
+                "NO"
+            }
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            out,
+            "Coverage: {} (Commits: {}, Repos: {}/{}, Candidates: {}, Global Commits: {}, Git Inspect: {})",
+            if report.coverage.is_partial {
+                "PARTIAL"
+            } else {
+                "COMPLETE"
+            },
+            report.coverage.commits_scanned,
+            report.coverage.repositories_scanned,
+            report.coverage.repositories_total,
+            report.coverage.candidate_repositories_found,
+            report.coverage.global_commits_found,
+            if report.coverage.git_history_inspected {
+                "YES"
+            } else {
+                "NO"
+            }
+        )
+        .unwrap();
+    }
+    if let Some(notes) = &report.coverage.notes {
+        writeln!(out, "Coverage Notes: {}", notes).unwrap();
+    }
     for (provider, st) in &report.provider_status {
         writeln!(
             out,

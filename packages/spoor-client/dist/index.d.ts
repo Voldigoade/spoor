@@ -79,6 +79,17 @@ export interface IdentityRecord {
     sources: string[];
     is_verified_signer: boolean;
 }
+export interface RelatedActorRecord {
+    name?: string;
+    email: string;
+    email_type: string;
+    first_seen?: string;
+    last_seen?: string;
+    commits_observed: number;
+    repositories: string[];
+    sources: string[];
+    relationship: string;
+}
 export interface RepoReport {
     name: string;
     full_name: string;
@@ -120,6 +131,12 @@ export interface CoverageRecord {
     commits_scanned: number;
     repositories_scanned: number;
     repositories_total: number;
+    owned_repositories_total?: number;
+    owned_repositories_scanned?: number;
+    external_repositories_discovered?: number;
+    external_repositories_scanned?: number;
+    candidate_repositories_total?: number;
+    candidate_repositories_scanned?: number;
     candidate_repositories_found?: number;
     global_commits_found?: number;
     git_history_inspected?: boolean;
@@ -147,6 +164,7 @@ export interface Report {
     profile?: ProfileReport;
     repositories: RepoReport[];
     identities: IdentityRecord[];
+    related_commit_actors?: RelatedActorRecord[];
     keys: KeyRecord[];
     inferences: InferenceRecord[];
     provider_status: Record<string, ProviderStatus>;
