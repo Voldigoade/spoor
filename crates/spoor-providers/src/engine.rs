@@ -89,6 +89,58 @@ fn is_target_actor(
     false
 }
 
+pub(crate) fn format_git_history_status(
+    git_attempted: usize,
+    git_succeeded: usize,
+    git_failed: usize,
+    git_timed_out: usize,
+) -> (ProviderHealth, String) {
+    let git_errors = git_failed.saturating_sub(git_timed_out);
+    if git_attempted == 0 {
+        (
+            ProviderHealth::Skipped,
+            "No candidate repositories matched git history inspection criteria".to_string(),
+        )
+    } else if git_succeeded == git_attempted {
+        (
+            ProviderHealth::Ok,
+            format!("Inspected all {git_succeeded} candidate repositories via bare git clone"),
+        )
+    } else if git_succeeded > 0 {
+        let failure_breakdown = if git_timed_out > 0 && git_errors > 0 {
+            format!("{git_timed_out} timed out, {git_errors} failed")
+        } else if git_timed_out > 0 {
+            format!("{git_timed_out} timed out")
+        } else {
+            format!("{git_failed} failed")
+        };
+        (
+            ProviderHealth::Partial,
+            format!("{git_succeeded} of {git_attempted} candidate repositories inspected ({failure_breakdown})"),
+        )
+    } else if git_timed_out == git_attempted {
+        (
+            ProviderHealth::Unavailable,
+            format!("All {git_attempted} candidate git clone operations timed out"),
+        )
+    } else if git_timed_out == 0 {
+        (
+            ProviderHealth::Unavailable,
+            format!("All {git_attempted} candidate git clone operations failed"),
+        )
+    } else {
+        let failure_breakdown = if git_errors > 0 {
+            format!("{git_timed_out} timed out, {git_errors} failed")
+        } else {
+            format!("{git_timed_out} timed out")
+        };
+        (
+            ProviderHealth::Unavailable,
+            format!("0 of {git_attempted} candidate repositories inspected ({failure_breakdown})"),
+        )
+    }
+}
+
 type ScannedRepoMeta = (Option<HashMap<String, u64>>, Option<RepoHygiene>);
 
 #[derive(Debug, Clone)]
@@ -1427,27 +1479,12 @@ impl AnalysisEngine {
                 }
 
                 git_inspected = git_succeeded > 0;
-                let (status, msg) = if git_attempted == 0 {
-                    (
-                        ProviderHealth::Skipped,
-                        "No candidate repositories matched git history inspection criteria"
-                            .to_string(),
-                    )
-                } else if git_succeeded == git_attempted {
-                    (ProviderHealth::Ok, format!("Inspected all {git_succeeded} candidate repositories via bare git clone"))
-                } else if git_succeeded > 0 {
-                    (ProviderHealth::Partial, format!("{git_succeeded} of {git_attempted} candidate repositories inspected ({git_failed} failed)"))
-                } else if git_timed_out > 0 {
-                    (
-                        ProviderHealth::Unavailable,
-                        format!("All {git_attempted} candidate git clone operations timed out"),
-                    )
-                } else {
-                    (
-                        ProviderHealth::Unavailable,
-                        format!("All {git_attempted} candidate git clone operations failed"),
-                    )
-                };
+                let (status, msg) = format_git_history_status(
+                    git_attempted,
+                    git_succeeded,
+                    git_failed,
+                    git_timed_out,
+                );
 
                 report.provider_status.insert(
                     "Git History".to_string(),
@@ -3113,5 +3150,63 @@ mod tests {
             target_id,
             &target_anchors
         ));
+    }
+
+    #[test]
+    fn test_format_git_history_status_mixed_failures_and_breakdowns() {
+        // Zero successes, at least one timeout, at least one non-timeout failure (e.g. torvalds reproduction)
+        let (status, msg) = format_git_history_status(5, 0, 5, 4);
+        assert_eq!(status, ProviderHealth::Unavailable);
+        assert_eq!(
+            msg,
+            "0 of 5 candidate repositories inspected (4 timed out, 1 failed)"
+        );
+        assert!(
+            !msg.contains("All"),
+            "Mixed failure must NOT claim that all operations timed out"
+        );
+        assert!(
+            !msg.contains("operations timed out"),
+            "Mixed failure must NOT claim that all operations timed out"
+        );
+
+        // All timed out
+        let (status, msg) = format_git_history_status(5, 0, 5, 5);
+        assert_eq!(status, ProviderHealth::Unavailable);
+        assert_eq!(msg, "All 5 candidate git clone operations timed out");
+
+        // All failed without timeouts
+        let (status, msg) = format_git_history_status(5, 0, 5, 0);
+        assert_eq!(status, ProviderHealth::Unavailable);
+        assert_eq!(msg, "All 5 candidate git clone operations failed");
+
+        // All succeeded
+        let (status, msg) = format_git_history_status(5, 5, 0, 0);
+        assert_eq!(status, ProviderHealth::Ok);
+        assert_eq!(
+            msg,
+            "Inspected all 5 candidate repositories via bare git clone"
+        );
+
+        // Partial successes with mixed failures
+        let (status, msg) = format_git_history_status(5, 2, 3, 2);
+        assert_eq!(status, ProviderHealth::Partial);
+        assert_eq!(
+            msg,
+            "2 of 5 candidate repositories inspected (2 timed out, 1 failed)"
+        );
+
+        // Partial successes with only non-timeout failures
+        let (status, msg) = format_git_history_status(5, 2, 3, 0);
+        assert_eq!(status, ProviderHealth::Partial);
+        assert_eq!(msg, "2 of 5 candidate repositories inspected (3 failed)");
+
+        // Attempted 0
+        let (status, msg) = format_git_history_status(0, 0, 0, 0);
+        assert_eq!(status, ProviderHealth::Skipped);
+        assert_eq!(
+            msg,
+            "No candidate repositories matched git history inspection criteria"
+        );
     }
 }

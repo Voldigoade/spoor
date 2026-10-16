@@ -100,7 +100,6 @@ impl ProcessTreeChild {
 mod win {
     use super::ProcessCommand;
     use std::io;
-    use std::os::windows::io::RawHandle;
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::Foundation::{
         CloseHandle, DuplicateHandle, SetHandleInformation, BOOL, DUPLICATE_SAME_ACCESS, HANDLE,
@@ -108,9 +107,9 @@ mod win {
     };
     use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
-        JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        CreateJobObjectW, IsProcessInJob, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
     use windows_sys::Win32::System::Pipes::CreatePipe;
     use windows_sys::Win32::System::Threading::{
@@ -190,19 +189,6 @@ mod win {
                 }
 
                 Ok(Self { handle })
-            }
-        }
-
-        pub fn assign_process(&self, process_handle: RawHandle) -> Result<(), io::Error> {
-            unsafe {
-                if self.handle == 0 || self.handle == INVALID_HANDLE_VALUE {
-                    return Err(io::Error::other("Invalid job object handle"));
-                }
-                let ok = AssignProcessToJobObject(self.handle, process_handle as HANDLE);
-                if ok == 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
             }
         }
 
@@ -351,11 +337,6 @@ mod win {
                 let mut in_job: BOOL = 0;
                 let check_ok = IsProcessInJob(pi.hProcess, self.handle, &mut in_job);
                 if check_ok == 0 || in_job == 0 {
-                    let _ = AssignProcessToJobObject(self.handle, pi.hProcess);
-                    let _ = IsProcessInJob(pi.hProcess, self.handle, &mut in_job);
-                }
-
-                if in_job == 0 {
                     TerminateProcess(pi.hProcess, 1);
                     CloseHandle(pi.hThread);
                     CloseHandle(pi.hProcess);
@@ -366,7 +347,7 @@ mod win {
                         CloseHandle(stderr_read);
                     }
                     return Err(io::Error::other(
-                        "Process creation failed: process was not contained in Job Object",
+                        "Process creation failed: process was not atomically contained in Job Object",
                     ));
                 }
 
@@ -410,10 +391,8 @@ mod win {
                     return Err(err);
                 }
 
-                let exit_state: ExitState =
-                    std::sync::Arc::new((std::sync::Mutex::new(None), tokio::sync::Notify::new()));
+                let (exit_tx, exit_rx) = tokio::sync::watch::channel(None);
 
-                let exit_state_clone = exit_state.clone();
                 tokio::task::spawn_blocking(move || {
                     let wait_res = WaitForSingleObject(wait_handle, INFINITE);
                     let res = if wait_res == WAIT_FAILED {
@@ -434,8 +413,7 @@ mod win {
                         }
                     };
                     CloseHandle(wait_handle);
-                    *exit_state_clone.0.lock().unwrap() = Some(res);
-                    exit_state_clone.1.notify_waiters();
+                    let _ = exit_tx.send(Some(res));
                 });
 
                 let stdout_task = if stdout_read != 0 {
@@ -475,7 +453,7 @@ mod win {
                     pid: pi.dwProcessId,
                     stdout_task,
                     stderr_task,
-                    exit_state,
+                    exit_rx,
                 })
             }
         }
@@ -501,17 +479,12 @@ mod win {
         }
     }
 
-    type ExitState = std::sync::Arc<(
-        std::sync::Mutex<Option<Result<u32, String>>>,
-        tokio::sync::Notify,
-    )>;
-
     pub struct WinChild {
         h_process: HANDLE,
         pid: u32,
         stdout_task: Option<tokio::task::JoinHandle<Vec<u8>>>,
         stderr_task: Option<tokio::task::JoinHandle<Vec<u8>>>,
-        exit_state: ExitState,
+        exit_rx: tokio::sync::watch::Receiver<Option<Result<u32, String>>>,
     }
 
     unsafe impl Send for WinChild {}
@@ -525,8 +498,8 @@ mod win {
         pub async fn wait(&mut self) -> Result<std::process::ExitStatus, io::Error> {
             loop {
                 {
-                    let guard = self.exit_state.0.lock().unwrap();
-                    if let Some(res) = &*guard {
+                    let borrow = self.exit_rx.borrow();
+                    if let Some(res) = &*borrow {
                         return match res {
                             Ok(code) => {
                                 use std::os::windows::process::ExitStatusExt;
@@ -536,7 +509,21 @@ mod win {
                         };
                     }
                 }
-                self.exit_state.1.notified().await;
+                if self.exit_rx.changed().await.is_err() {
+                    let borrow = self.exit_rx.borrow();
+                    if let Some(res) = &*borrow {
+                        return match res {
+                            Ok(code) => {
+                                use std::os::windows::process::ExitStatusExt;
+                                Ok(std::process::ExitStatus::from_raw(*code))
+                            }
+                            Err(e) => Err(io::Error::other(e.clone())),
+                        };
+                    }
+                    return Err(io::Error::other(
+                        "Process exit notification channel closed unexpectedly",
+                    ));
+                }
             }
         }
 
@@ -720,36 +707,6 @@ impl ProcessTreeSession {
             let _ = cmd;
             Err(io::Error::other("Platform not supported"))
         }
-    }
-
-    pub fn prepare_command(&mut self, cmd: &mut tokio::process::Command) {
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.as_std_mut().process_group(0);
-        }
-        #[cfg(windows)]
-        {
-            let _ = cmd;
-        }
-    }
-
-    pub fn attach_child(&mut self, child: &tokio::process::Child) -> Result<(), io::Error> {
-        #[cfg(windows)]
-        {
-            if let Some(job) = &self.job {
-                if let Some(raw_handle) = child.raw_handle() {
-                    job.assign_process(raw_handle)?;
-                }
-            }
-        }
-        #[cfg(unix)]
-        {
-            if let Some(id) = child.id() {
-                self.pg_guard.set_pgid(id);
-            }
-        }
-        Ok(())
     }
 
     pub fn terminate(&mut self) {
